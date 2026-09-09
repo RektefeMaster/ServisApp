@@ -1,0 +1,24 @@
+# Yerel geliştirme ve entegrasyon testleri için Postgres.
+# Supabase üretimde aynı sürümü çalıştırır; şema/RLS davranışı birebir aynı olsun.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: servisapp-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: servisapp
+      TZ: UTC
+    command: ['postgres', '-c', 'timezone=UTC', '-c', 'log_statement=none']
+    ports:
+      - '54322:5432'
+    volumes:
+      - servisapp-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d servisapp']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  servisapp-pgdata:

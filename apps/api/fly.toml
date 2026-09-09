@@ -1,0 +1,28 @@
+app = "servisapp-api"
+primary_region = "fra"   # Supabase EU bölgesine komşu
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "off"     # sabah/akşam seferlerinde soğuk başlangıç istemiyoruz
+  auto_start_machines = true
+  min_machines_running = 2
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health/ready"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"               # ölç, sonra büyüt (SPEC §15)

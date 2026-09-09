@@ -1,0 +1,9 @@
+{
+  "name": "@servisapp/config",
+  "version": "0.0.0",
+  "private": true,
+  "files": [
+    "tsconfig.node.json",
+    "tsconfig.lib.json"
+  ]
+}
