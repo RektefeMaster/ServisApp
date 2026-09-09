@@ -7,11 +7,17 @@ WORKDIR /repo
 
 FROM base AS build
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json ./
+COPY packages/config/package.json packages/config/
 COPY packages/contracts/package.json packages/contracts/
 COPY packages/db/package.json packages/db/
 COPY packages/domain/package.json packages/domain/
+COPY packages/ui/package.json packages/ui/
 COPY apps/api/package.json apps/api/
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+COPY apps/admin/package.json apps/admin/
+COPY apps/parent/package.json apps/parent/
+COPY apps/crew/package.json apps/crew/
+COPY apps/simulator/package.json apps/simulator/
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --filter @servisapp/api...
 COPY packages/ packages/
 COPY apps/api/ apps/api/
 RUN pnpm --filter @servisapp/api... build

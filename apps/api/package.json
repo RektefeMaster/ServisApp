@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch --env-file=../../.env src/server.ts",
+    "dev:worker": "tsx watch --env-file=../../.env src/worker.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file=../../.env dist/server.js",
+    "start:worker": "node --env-file=../../.env dist/worker.js",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "lint": "eslint src"
@@ -23,11 +25,14 @@
     "fastify": "5.12.3",
     "jose": "6.2.12",
     "pg-boss": "12.30.0",
+    "pino": "10.3.1",
     "postgres": "3.4.9",
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "11.12.0",
     "pino-pretty": "13.1.3",
+    "testcontainers": "11.12.0",
     "tsx": "4.23.13",
     "typescript": "6.0.3",
     "vitest": "5.0.0"

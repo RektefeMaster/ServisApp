@@ -1,9 +1,4 @@
-import {
-  createRemoteJWKSet,
-  jwtVerify,
-  type JWTPayload,
-  type JWTVerifyGetKey,
-} from 'jose';
+import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
 import { HttpError, unauthorized } from '../http-error.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -82,15 +77,8 @@ export async function verifyAccessToken(token: string, input: JwtVerifyInput): P
 }
 
 function emailVerified(payload: JWTPayload): boolean {
-  if (payload['email_verified'] === true || payload['email_confirmed'] === true) {
-    return true;
-  }
-  const meta = payload['user_metadata'];
-  return isRecord(meta) && meta['email_verified'] === true;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  // user_metadata GoTrue'da kullanıcı tarafından yazılabilir; yetki kararı olmaz.
+  return payload['email_verified'] === true || payload['email_confirmed'] === true;
 }
 
 function e164Phone(value: string | null): string | null {
@@ -117,4 +105,3 @@ export function bearerToken(header: string | string[] | undefined): string | nul
   if (scheme !== 'Bearer' || !token) return null;
   return token;
 }
-

@@ -67,6 +67,16 @@ describe('JWT doğrulama', () => {
     expect(claims.email).toBeNull();
   });
 
+  it('user_metadata içindeki email_verified iddiayı bağlama için yetmez', async () => {
+    const token = await sign({
+      role: 'authenticated',
+      email: 'ayse@example.com',
+      user_metadata: { email_verified: true },
+    });
+    const claims = await verifyAccessToken(token, { secret, issuer });
+    expect(claims.email).toBeNull();
+  });
+
   it('arti isareti olmadan gelen E.164 telefonu normalleştirir', async () => {
     const token = await sign({
       role: 'authenticated',

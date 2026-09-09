@@ -9,12 +9,17 @@ primary_region = "fra"   # Supabase EU bölgesine komşu
   PORT = "3000"
   LOG_LEVEL = "info"
 
+[processes]
+  app = "node dist/server.js"
+  worker = "node dist/worker.js"
+
 [http_service]
   internal_port = 3000
   force_https = true
   auto_stop_machines = "off"     # sabah/akşam seferlerinde soğuk başlangıç istemiyoruz
   auto_start_machines = true
   min_machines_running = 2
+  processes = ["app"]
 
   [[http_service.checks]]
     grace_period = "10s"
@@ -24,5 +29,14 @@ primary_region = "fra"   # Supabase EU bölgesine komşu
     path = "/health/ready"
 
 [[vm]]
+  processes = ["app"]
   size = "shared-cpu-1x"
   memory = "512mb"               # ölç, sonra büyüt (SPEC §15)
+
+[[vm]]
+  processes = ["worker"]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Worker HTTP almaz; deploy sonrası `fly scale count worker=1` (kapanmasın).
+

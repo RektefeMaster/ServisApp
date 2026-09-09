@@ -1,0 +1,29 @@
+{
+  "name": "@servisapp/crew",
+  "version": "0.0.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "dev": "dotenv -e ../../.env -- expo start --port 8082",
+    "start": "dotenv -e ../../.env -- expo start --port 8082",
+    "android": "dotenv -e ../../.env -- expo start --android --port 8082",
+    "ios": "dotenv -e ../../.env -- expo start --ios --port 8082",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@servisapp/contracts": "workspace:*",
+    "@servisapp/domain": "workspace:*",
+    "@servisapp/ui": "workspace:*",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@supabase/supabase-js": "2.114.0",
+    "expo": "57.0.21",
+    "expo-status-bar": "57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "dotenv-cli": "11.0.0",
+    "typescript": "6.0.3"
+  }
+}

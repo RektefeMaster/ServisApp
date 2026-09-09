@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "ServisApp Personel",
+    "slug": "servisapp-crew",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "servisapp-crew",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.servisapp.crew"
+    },
+    "android": {
+      "package": "app.servisapp.crew",
+      "adaptiveIcon": {
+        "backgroundColor": "#0F172A",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}

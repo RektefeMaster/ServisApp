@@ -24,8 +24,10 @@ import {
 } from '@servisapp/db';
 import { and, eq, sql } from 'drizzle-orm';
 import type postgres from 'postgres';
-import { badRequest, conflict, HttpError } from '../http-error.js';
-import type { AdminPort, AppData, SessionPort } from './ports.js';
+import { conflict, HttpError } from '../http-error.js';
+import { mapDbError } from './db-error.js';
+import { createRouteAdminPort } from './route-admin.js';
+import type { AdminPort, AppData, RouteAdminPort, SessionPort } from './ports.js';
 
 interface SessionRow {
   identityId: string;
@@ -42,7 +44,7 @@ export function createPostgresData(sqlClient: postgres.Sql): AppData {
   return {
     getPlatform: () => readPlatform(sqlClient),
     session: createSessionPort(sqlClient),
-    admin: createAdminPort(db),
+    admin: { ...createAdminPort(db), ...createRouteAdminPort(db) },
   };
 }
 
@@ -118,7 +120,7 @@ async function withAdmin<T>(
   }
 }
 
-function createAdminPort(db: Database): AdminPort {
+function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
   return {
     pinAddress(tenantId, input: PinAddressInput) {
       return withAdmin(db, tenantId, '', async (tx) => {
@@ -386,56 +388,4 @@ async function attachMembership(
 
   await tx.insert(membershipRole).values({ tenantId, membershipId, role }).onConflictDoNothing();
   return membershipId;
-}
-
-function mapDbError(error: unknown): never {
-  if (error instanceof HttpError) throw error;
-
-  const message = errorMessage(error);
-  if (message.includes('identity_not_provisioned')) {
-    throw new HttpError(403, 'identity_not_provisioned', 'Bu hesap henüz tanımlanmamış');
-  }
-  if (message.includes('identity_auth_mismatch')) {
-    throw conflict('identity_auth_mismatch', 'Kimlik başka bir hesaba bağlı');
-  }
-  if (message.includes('identity_email_conflict')) {
-    throw conflict('identity_email_conflict', 'Bu e-posta başka bir kimliğe kayıtlı');
-  }
-  if (message.includes('identity_conflict')) {
-    throw conflict('identity_conflict', 'Bu kimlik zaten kayıtlı');
-  }
-  if (message.includes('identity_phone_invalid')) {
-    throw badRequest('identity_phone_invalid', 'Telefon E.164 biçiminde olmalı');
-  }
-  if (message.includes('identity_name_required')) {
-    throw badRequest('identity_name_required', 'Ad soyad zorunlu');
-  }
-
-  const code = pgCode(error);
-  if (code === '23505') {
-    throw conflict('duplicate', 'Bu kayıt zaten var');
-  }
-  if (code === '23503') {
-    throw badRequest('invalid_reference', 'Bağlı kayıt bulunamadı');
-  }
-  if (code === '23514') {
-    throw badRequest('check_violation', 'Kayıt kurala uymuyor');
-  }
-  throw error instanceof Error ? error : new Error(String(error));
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
-
-function pgCode(error: unknown): string | undefined {
-  let current: unknown = error;
-  for (let i = 0; i < 5 && current && typeof current === 'object'; i += 1) {
-    if ('code' in current && typeof current.code === 'string' && /^\d{5}$/.test(current.code)) {
-      return current.code;
-    }
-    current = 'cause' in current ? current.cause : undefined;
-  }
-  return undefined;
 }

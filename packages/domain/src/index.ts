@@ -41,3 +41,20 @@ export {
   type StopOccupancyChange,
 } from './capacity.js';
 export { compareSemver, isAppVersionSupported, parseSemver } from './app-version.js';
+export { haversineMeters, type LatLng } from './haversine.js';
+export {
+  evaluateRouteCapacity,
+  evaluateRoutePlan,
+  occupancyForSegment,
+  type RoutePlanIssue,
+  type RoutePlanResult,
+  type RoutePlanStop,
+  type RouteSegment,
+  type StopKind,
+} from './route-plan.js';
+export {
+  suggestWaypointOrder,
+  type SchoolAnchor,
+  type TravelCost,
+  type Waypoint,
+} from './waypoint-order.js';

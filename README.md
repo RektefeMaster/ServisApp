@@ -21,33 +21,47 @@ cp .env.development.example .env
 pnpm db:migrate                       # şema, RLS, fonksiyonlar
 pnpm db:bootstrap-roles               # servisapp_api / servisapp_worker parolaları
 pnpm --filter @servisapp/api dev
-curl localhost:3000/health/ready      # {"status":"ok"}
+pnpm --filter @servisapp/api dev:worker   # kuyruk (ayrı süreç)
+curl localhost:3000/health/ready          # {"status":"ok"}
 ```
 
+`pnpm dev` API (3000), yönetim paneli (3001), veli Metro (8081) ve personel Metro
+(8082) süreçlerini birlikte açar. Worker ayrıdır: `pnpm dev:worker`.
+
 Üretim ortamı için `.env.example` kullanılır; parolalar ve kriptografik sırlar
-Fly secret olarak tutulur, repoya girmez.
+Fly secret olarak tutulur, repoya girmez. İstemciler yalnız publishable/anon anahtar
+görür; `service_role` tarayıcıya ve telefona girmez.
 
 ## Komutlar
 
 | Komut                     | Ne yapar                                                     |
 | ------------------------- | ------------------------------------------------------------ |
-| `pnpm dev`                | Tüm geliştirme süreçlerini başlatır                          |
+| `pnpm dev`                | API + admin + veli + personel                                |
+| `pnpm dev:api`            | Yalnız Fastify                                               |
+| `pnpm dev:worker`         | pg-boss kuyruk işçisi                                        |
 | `pnpm build`              | Bağımlılık sırasına göre derler                              |
 | `pnpm typecheck`          | Tip kontrolü                                                 |
 | `pnpm lint`               | ESLint                                                       |
 | `pnpm test`               | Birim + entegrasyon testleri                                 |
 | `pnpm db:bootstrap-roles` | Uygulama rollerini oluşturur (idempotent, parolalar env'den) |
 | `pnpm db:generate`        | Şemadan migration üretir                                     |
-| `pnpm db:migrate`         | Migration'ları uygular (doğrudan bağlantı)                   |
+| `pnpm db:migrate`         | Migration'ları uygular (doğrudan bağlantı; hosted'a değil)   |
 | `pnpm db:seed`            | Yerel demo tohumu                                            |
 
 ## Yapı
 
 ```
-apps/api        Fastify — iş mantığının tamamı burada
-packages/domain Saf kurallar: durum makinesi, reconcile, kapasite
+apps/api         Fastify — iş mantığının tamamı burada
+apps/admin       Next.js + Tailwind (shadcn hazır)
+apps/parent      Expo 57 — veli
+apps/crew        Expo 57 — şoför + hostes
+apps/simulator   yük & saha senaryosu
+packages/domain  Saf kurallar: durum makinesi, reconcile, kapasite
 packages/contracts  zod şemaları = API sözleşmesi
-packages/db     Drizzle şema, migration, RLS, fonksiyonlar, roller
+packages/db      Drizzle şema, migration, RLS, fonksiyonlar, roller
+packages/ui      paylaşılan tema / RN bileşenleri
+packages/config  ortak tsconfig
+docs/            domain, KVKK iskeleti, operasyon el kitabı
 ```
 
 ## Değişmez kurallar

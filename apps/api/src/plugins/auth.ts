@@ -33,6 +33,8 @@ export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppD
   app.addHook('onRequest', async (request) => {
     const path = request.url.split('?')[0] ?? request.url;
     if (!path.startsWith('/v1')) return;
+    // Tarayıcı preflight Authorization taşımaz; CORS eklentisi cevaplasın.
+    if (request.method === 'OPTIONS') return;
 
     if (!deps.data) {
       throw new Error('app data missing');

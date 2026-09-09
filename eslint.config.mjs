@@ -2,7 +2,17 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/node_modules/**', '**/.turbo/**', '**/*.d.ts'] },
+  {
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      '**/.turbo/**',
+      '**/*.d.ts',
+      '**/apps/admin/**',
+      '**/apps/parent/**',
+      '**/apps/crew/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
@@ -18,7 +28,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.test.ts', '**/scripts/**'],
+    files: ['**/*.test.ts', '**/src/e2e/**', '**/scripts/**'],
     rules: { 'no-console': 'off' },
   },
 );

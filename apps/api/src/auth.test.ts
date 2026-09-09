@@ -76,6 +76,18 @@ function testData(role: 'ADMIN' | 'GUARDIAN' | 'DRIVER' = 'ADMIN'): {
         createStudent: vi.fn(() => Promise.resolve({ id: randomUUID() })),
         listStudents: vi.fn(() => Promise.resolve([])),
         createGuardian: vi.fn(() => Promise.resolve({ identityId, membershipId })),
+        createStop: vi.fn(() => Promise.resolve({ id: randomUUID() })),
+        listStops: vi.fn(() => Promise.resolve([])),
+        createRoute: vi.fn(() =>
+          Promise.resolve({ id: randomUUID(), draftVersionId: randomUUID() }),
+        ),
+        listRoutes: vi.fn(() => Promise.resolve([])),
+        getRoute: vi.fn(() => Promise.resolve(null)),
+        getRouteVersion: vi.fn(() => Promise.resolve(null)),
+        replaceRouteStops: vi.fn(),
+        suggestRouteStopOrder: vi.fn(),
+        publishRouteVersion: vi.fn(),
+        cloneRouteVersion: vi.fn(() => Promise.resolve({ id: randomUUID(), versionNo: 2 })),
       },
     },
   };
@@ -254,5 +266,22 @@ describe('kimlik ve kurulum', () => {
       headers: { 'x-client': 'admin' },
     });
     expect(response.statusCode).toBe(401);
+  });
+
+  it('CORS preflight kimlik istemez', async () => {
+    const app = appWith();
+    apps.push(app);
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/v1/session',
+      headers: {
+        origin: 'http://127.0.0.1:3001',
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'authorization,x-client',
+      },
+    });
+    expect(response.statusCode).not.toBe(400);
+    expect(response.statusCode).not.toBe(401);
+    expect(response.statusCode).not.toBe(403);
   });
 });

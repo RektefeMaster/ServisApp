@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { readdir } from 'node:fs/promises';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { applyMigrations } from './migrate-files.js';
+import { applyMigrations, migrationsDir } from './migrate-files.js';
 import { asApi, insertWorld } from './test/fixture.js';
 import { startHarness, stopHarness, type Harness } from './test/harness.js';
 
@@ -404,7 +405,8 @@ describe('şema emniyeti', () => {
     const [row] = await harness.sql<{ n: number }[]>`
       select count(*)::int as n from schema_migrations
     `;
-    expect(row?.n).toBe(4);
+    const files = (await readdir(migrationsDir())).filter((name) => name.endsWith('.sql'));
+    expect(row?.n).toBe(files.length);
   });
 
   it('auth_user_id olmadan kimlik açılır ve SYSTEM olay aktörü yazılır', async () => {
@@ -614,5 +616,39 @@ describe('şema emniyeti', () => {
         `,
       ),
     ).rejects.toThrow(/permission denied/);
+  });
+});
+
+describe('rota sürüm emniyeti', () => {
+  it('aynı rotada ikinci taslak yazılamaz', async () => {
+    const world = await insertWorld(harness.sql);
+    await harness.sql`
+      insert into route_version (tenant_id, route_id, version_no, status, effective_from)
+      values (${world.tenantA}, ${world.routeId}, 2, 'DRAFT', '2026-09-10')
+    `;
+    await expect(
+      harness.sql`
+        insert into route_version (tenant_id, route_id, version_no, status, effective_from)
+        values (${world.tenantA}, ${world.routeId}, 3, 'DRAFT', '2026-09-11')
+      `,
+    ).rejects.toThrow(/route_version_one_draft/);
+  });
+
+  it('aynı durak bir sürümde iki kez duramaz', async () => {
+    const world = await insertWorld(harness.sql);
+    const [version] = await harness.sql<{ id: string }[]>`
+      select id from route_version where route_id = ${world.routeId}
+    `;
+    if (!version) throw new Error('rota sürümü yok');
+    await harness.sql`
+      insert into route_stop (tenant_id, route_version_id, stop_id, seq, kind)
+      values (${world.tenantA}, ${version.id}, ${world.stopId}, 1, 'PICKUP')
+    `;
+    await expect(
+      harness.sql`
+        insert into route_stop (tenant_id, route_version_id, stop_id, seq, kind)
+        values (${world.tenantA}, ${version.id}, ${world.stopId}, 2, 'SCHOOL')
+      `,
+    ).rejects.toThrow(/route_stop_stop/);
   });
 });

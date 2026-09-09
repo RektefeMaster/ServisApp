@@ -17,7 +17,9 @@
     "db:generate": "pnpm --filter @servisapp/db generate",
     "db:migrate": "pnpm --filter @servisapp/db migrate",
     "db:seed": "pnpm --filter @servisapp/db seed",
-    "db:bootstrap-roles": "pnpm --filter @servisapp/db bootstrap-roles"
+    "db:bootstrap-roles": "pnpm --filter @servisapp/db bootstrap-roles",
+    "dev:api": "pnpm --filter @servisapp/api dev",
+    "dev:worker": "pnpm --filter @servisapp/api dev:worker"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -30,7 +32,9 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "esbuild"
+      "esbuild",
+      "sharp",
+      "unrs-resolver"
     ]
   }
 }

@@ -25,6 +25,15 @@ const schema = z.object({
   OTP_ENCRYPTION_KEY: z.string().min(32),
 
   SENTRY_DSN: z.string().optional(),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.url().optional(),
+  ),
+  // Tarayıcıdaki admin paneli (Next). Mobil CORS kullanmaz. Boşsa CORS kapalı kalır.
+  ADMIN_ORIGINS: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.string().optional(),
+  ),
 });
 
 export type Env = z.infer<typeof schema>;

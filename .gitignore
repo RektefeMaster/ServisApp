@@ -14,5 +14,8 @@ coverage/
 .DS_Store
 *.log
 .expo/
+.next/
+expo-env.d.ts
+.claude/
 ios/
 android/

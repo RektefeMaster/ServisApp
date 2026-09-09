@@ -19,6 +19,18 @@ export interface AppDeps {
   data?: AppData;
 }
 
+function adminCorsOrigin(origins: string | undefined): boolean | string | string[] {
+  if (!origins) return false;
+  const list = origins
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  const [first, ...rest] = list;
+  if (!first) return false;
+  if (rest.length === 0) return first;
+  return list;
+}
+
 export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
   const app = Fastify({
     genReqId: generateRequestId,
@@ -39,7 +51,6 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
       ...(env.NODE_ENV === 'development' ? { transport: { target: 'pino-pretty' } } : {}),
     },
     trustProxy: true,
-    disableRequestLogging: false,
     bodyLimit: 1_048_576,
   });
 
@@ -47,7 +58,19 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
   registerAuth(app, { env, data });
 
   void app.register(helmet, { contentSecurityPolicy: false });
-  void app.register(cors, { origin: false });
+  void app.register(cors, {
+    origin: adminCorsOrigin(env.ADMIN_ORIGINS),
+    allowedHeaders: [
+      'authorization',
+      'content-type',
+      'x-client',
+      'x-tenant-id',
+      'x-app-version',
+      'x-device-id',
+      'x-request-id',
+    ],
+    maxAge: 86_400,
+  });
   void app.register(rateLimit, {
     max: 300,
     timeWindow: '1 minute',

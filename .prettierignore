@@ -4,3 +4,7 @@ coverage
 pnpm-lock.yaml
 *.sql
 SPEC.md
+.next
+.expo
+apps/admin/next-env.d.ts
+.agents

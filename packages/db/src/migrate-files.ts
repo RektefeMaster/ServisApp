@@ -29,7 +29,12 @@ export async function applyMigrations(url: string): Promise<void> {
       const body = await readFile(join(dir, file), 'utf8');
       await sql.begin(async (tx) => {
         await tx.unsafe(body);
-        await tx`insert into schema_migrations (filename) values (${file})`;
+        // 0005 hosted defteri kendisi doldurur; ikinci INSERT transaction'ı
+        // geri alıp sonraki dosyaları (pg-boss) dışarıda bırakmasın.
+        await tx`
+          insert into schema_migrations (filename) values (${file})
+          on conflict (filename) do nothing
+        `;
       });
     }
   } finally {

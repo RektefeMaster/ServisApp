@@ -13,6 +13,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import {
@@ -284,6 +285,12 @@ export const routeVersion = pgTable(
   (t) => [
     unique('route_version_no').on(t.tenantId, t.routeId, t.versionNo),
     tenantRowUnique('route_version', t.tenantId, t.id),
+    uniqueIndex('route_version_one_published')
+      .on(t.tenantId, t.routeId)
+      .where(sql`${t.status} = 'PUBLISHED'`),
+    uniqueIndex('route_version_one_draft')
+      .on(t.tenantId, t.routeId)
+      .where(sql`${t.status} = 'DRAFT'`),
     foreignKey({
       name: 'route_version_route_fk',
       columns: [t.tenantId, t.routeId],
@@ -307,7 +314,9 @@ export const routeStop = pgTable(
   },
   (t) => [
     unique('route_stop_seq').on(t.routeVersionId, t.seq),
+    unique('route_stop_stop').on(t.tenantId, t.routeVersionId, t.stopId),
     tenantRowUnique('route_stop', t.tenantId, t.id),
+    check('route_stop_seq_positive', sql`${t.seq} >= 1`),
     foreignKey({
       name: 'route_stop_version_fk',
       columns: [t.tenantId, t.routeVersionId],
