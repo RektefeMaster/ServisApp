@@ -7,6 +7,7 @@ import {
   recordVehicleCheckInput,
   reportIncidentInput,
   studentCommandInput,
+  undoStudentCommandInput,
   verifyDeliveryOtpInput,
 } from '@servisapp/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -164,6 +165,17 @@ export function registerTripRoutes(app: FastifyInstance, data: AppData): void {
     const params = parse(tripIdParams, request.params);
     const input = parse(studentCommandInput, request.body);
     return data.trips.applyStudentCommand(
+      tenantIdOf(request),
+      actorOf(request),
+      params.tripId,
+      input,
+    );
+  });
+
+  app.post('/v1/trips/:tripId/commands/undo', async (request) => {
+    const params = parse(tripIdParams, request.params);
+    const input = parse(undoStudentCommandInput, request.body);
+    return data.trips.undoStudentCommand(
       tenantIdOf(request),
       actorOf(request),
       params.tripId,

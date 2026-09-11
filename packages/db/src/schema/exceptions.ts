@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import {
   date,
   foreignKey,
+  index,
   pgTable,
   text,
   timestamp,
@@ -182,11 +183,15 @@ export const notification = pgTable(
     studentId: uuid('student_id'),
     status: notificationStatusEnum('status').notNull().default('QUEUED'),
     sentAt: timestamp('sent_at', { withTimezone: true }),
+    holdUntil: timestamp('hold_until', { withTimezone: true }),
+    sourceCommandId: uuid('source_command_id'),
+    refId: uuid('ref_id'),
     dedupeKey: text('dedupe_key').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     unique('notification_dedupe').on(t.tenantId, t.dedupeKey),
+    index('notification_outbox_due_idx').on(t.tenantId, t.createdAt),
     foreignKey({
       name: 'notification_recipient_fk',
       columns: [t.tenantId, t.recipientMembershipId],

@@ -38,10 +38,12 @@ import {
   haversineMeters,
   liveLocationAvailable,
   parentCanTrack,
+  planStopArrivals,
   remainingEtaSeconds,
   sharedTrackingPayload,
   shouldArchivePing,
   shouldNotifyApproach,
+  shouldNotifyGuardian,
   shouldRefreshRoutes,
   studentStillTracked,
   type BaselineLeg,
@@ -58,7 +60,6 @@ import { loadParentChildren } from './plan-query.js';
 import type { TripActor } from './ports.js';
 
 const FAILOVER_MS = 60_000;
-const STOP_ARRIVAL_RADIUS_M = 75;
 
 export interface TrackingPort {
   ingest(
@@ -592,7 +593,7 @@ async function unexpectedDwellMs(
   const nearest = Math.min(
     ...stops.map((stop) => haversineMeters(vehicle, { lat: stop.lat, lng: stop.lng })),
   );
-  if (nearest <= STOP_ARRIVAL_RADIUS_M) return null;
+  if (nearest <= 75) return null;
   const pings = await tx
     .select({
       lat: vehicleLocationPing.lat,
@@ -632,61 +633,81 @@ async function markSequentialArrivals(
     .from(tripStop)
     .where(and(eq(tripStop.tripId, input.tripId), eq(tripStop.tenantId, input.tenantId)))
     .orderBy(asc(tripStop.seq));
-  const next = stops.find((stop) => !stop.arrivedAt);
-  if (!next) return;
-  const distance = haversineMeters(input.vehicle, { lat: next.lat, lng: next.lng });
-  if (distance > STOP_ARRIVAL_RADIUS_M) return;
-  await tx
-    .update(tripStop)
-    .set({ actualArrivedAt: input.now })
-    .where(and(eq(tripStop.id, next.id), eq(tripStop.tenantId, input.tenantId)));
-  const previous = [...stops]
-    .reverse()
-    .find((stop) => stop.arrivedAt && Number(stop.seq) < Number(next.seq));
-  if (!previous?.sourceStopId || !next.sourceStopId || !previous.arrivedAt) return;
-  const actualSec = Math.max(
-    1,
-    Math.round((input.now.getTime() - previous.arrivedAt.getTime()) / 1000),
+  const marks = planStopArrivals(
+    stops.map((stop) => ({
+      id: stop.id,
+      seq: Number(stop.seq),
+      lat: stop.lat,
+      lng: stop.lng,
+      arrivedAt: stop.arrivedAt,
+    })),
+    input.vehicle,
   );
-  const bucket = timeBucketOf(input.plannedDepartureAt);
-  await tx
-    .insert(routeSegmentStat)
-    .values({
-      tenantId: input.tenantId,
-      routeId: input.routeId,
-      fromStopId: previous.sourceStopId,
-      toStopId: next.sourceStopId,
-      weekday: bucket.weekday,
-      timeBucket: bucket.hour,
-      sampleCount: 1,
-      avgSeconds: actualSec,
-      medianSeconds: actualSec,
-      p75Seconds: actualSec,
-      updatedAt: input.now,
-    })
-    .onConflictDoUpdate({
-      target: [
-        routeSegmentStat.tenantId,
-        routeSegmentStat.routeId,
-        routeSegmentStat.fromStopId,
-        routeSegmentStat.toStopId,
-        routeSegmentStat.weekday,
-        routeSegmentStat.timeBucket,
-      ],
-      set: {
-        sampleCount: sql`${routeSegmentStat.sampleCount} + 1`,
-        avgSeconds: sql`coalesce((
-          (${routeSegmentStat.avgSeconds} * ${routeSegmentStat.sampleCount} + ${actualSec})
-          / (${routeSegmentStat.sampleCount} + 1)
-        )::int, ${actualSec})`,
-        medianSeconds: sql`coalesce((
-          (${routeSegmentStat.medianSeconds} * ${routeSegmentStat.sampleCount} + ${actualSec})
-          / (${routeSegmentStat.sampleCount} + 1)
-        )::int, ${actualSec})`,
-        p75Seconds: sql`greatest(coalesce(${routeSegmentStat.p75Seconds}, ${actualSec}), ${actualSec})`,
+  if (marks.length === 0) return;
+
+  const byId = new Map(stops.map((stop) => [stop.id, stop] as const));
+  for (const mark of marks) {
+    const current = byId.get(mark.stopId);
+    if (!current || current.arrivedAt) continue;
+    await tx
+      .update(tripStop)
+      .set({ actualArrivedAt: input.now })
+      .where(and(eq(tripStop.id, current.id), eq(tripStop.tenantId, input.tenantId)));
+    current.arrivedAt = input.now;
+    if (mark.kind === 'MISSED') continue;
+    const previous = [...stops]
+      .reverse()
+      .find(
+        (stop) =>
+          stop.arrivedAt &&
+          Number(stop.seq) < Number(current.seq) &&
+          stop.id !== current.id,
+      );
+    if (!previous?.sourceStopId || !current.sourceStopId || !previous.arrivedAt) continue;
+    const actualSec = Math.max(
+      1,
+      Math.round((input.now.getTime() - previous.arrivedAt.getTime()) / 1000),
+    );
+    const bucket = timeBucketOf(input.plannedDepartureAt);
+    await tx
+      .insert(routeSegmentStat)
+      .values({
+        tenantId: input.tenantId,
+        routeId: input.routeId,
+        fromStopId: previous.sourceStopId,
+        toStopId: current.sourceStopId,
+        weekday: bucket.weekday,
+        timeBucket: bucket.hour,
+        sampleCount: 1,
+        avgSeconds: actualSec,
+        medianSeconds: actualSec,
+        p75Seconds: actualSec,
         updatedAt: input.now,
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: [
+          routeSegmentStat.tenantId,
+          routeSegmentStat.routeId,
+          routeSegmentStat.fromStopId,
+          routeSegmentStat.toStopId,
+          routeSegmentStat.weekday,
+          routeSegmentStat.timeBucket,
+        ],
+        set: {
+          sampleCount: sql`${routeSegmentStat.sampleCount} + 1`,
+          avgSeconds: sql`coalesce((
+            (${routeSegmentStat.avgSeconds} * ${routeSegmentStat.sampleCount} + ${actualSec})
+            / (${routeSegmentStat.sampleCount} + 1)
+          )::int, ${actualSec})`,
+          medianSeconds: sql`coalesce((
+            (${routeSegmentStat.medianSeconds} * ${routeSegmentStat.sampleCount} + ${actualSec})
+            / (${routeSegmentStat.sampleCount} + 1)
+          )::int, ${actualSec})`,
+          p75Seconds: sql`greatest(coalesce(${routeSegmentStat.p75Seconds}, ${actualSec}), ${actualSec})`,
+          updatedAt: input.now,
+        },
+      });
+  }
 }
 
 function approachMinutes(settings: unknown): number {
@@ -701,8 +722,17 @@ async function queueApproachNotifications(
   tripId: string,
   studentId: string,
 ): Promise<void> {
+  const [tripRow] = await tx
+    .select({ segment: trip.segment })
+    .from(trip)
+    .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)));
+  const segment = tripRow?.segment === 'AFTERNOON' ? 'AFTERNOON' : 'MORNING';
   const guardians = await tx
-    .select({ membershipId: studentGuardian.guardianMembershipId })
+    .select({
+      membershipId: studentGuardian.guardianMembershipId,
+      notifyAm: studentGuardian.notifyAm,
+      notifyPm: studentGuardian.notifyPm,
+    })
     .from(studentGuardian)
     .where(
       and(
@@ -712,6 +742,16 @@ async function queueApproachNotifications(
       ),
     );
   for (const guardian of guardians) {
+    if (
+      !shouldNotifyGuardian({
+        relationActive: true,
+        notifyAm: guardian.notifyAm,
+        notifyPm: guardian.notifyPm,
+        segment,
+      })
+    ) {
+      continue;
+    }
     await tx
       .insert(notification)
       .values({

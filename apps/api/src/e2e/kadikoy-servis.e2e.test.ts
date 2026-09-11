@@ -100,6 +100,8 @@ interface World {
   driverMembershipId: string;
   attendantMembershipId: string;
   guardianMembershipId: string;
+  adaGuardianMembershipId: string;
+  canGuardianMembershipId: string;
   hasanDevice: string;
   elifDevice: string;
   morningTripId: string;
@@ -385,6 +387,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
         | 'RESOLVE_HANDED_TO_ADMIN';
       expectedStateSeq: number;
       clientEventId?: string;
+      receiverMembershipId?: string;
     },
   ) {
     return asUser('POST', `/v1/trips/${tripId}/commands`, actor, {
@@ -392,6 +395,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       tripStudentId: input.tripStudentId,
       action: input.action,
       expectedStateSeq: input.expectedStateSeq,
+      ...(input.receiverMembershipId
+        ? { receiverMembershipId: input.receiverMembershipId }
+        : {}),
     });
   }
 
@@ -488,6 +494,8 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       driverMembershipId: '',
       attendantMembershipId: '',
       guardianMembershipId: '',
+      adaGuardianMembershipId: '',
+      canGuardianMembershipId: '',
       hasanDevice: '',
       elifDevice: '',
       morningTripId: '',
@@ -1039,6 +1047,44 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(can.status).toBe(200);
     world.canStudentId = requireString(can.body, 'id');
+
+    const adaGuardian = await asUser(
+      'POST',
+      `/v1/admin/students/${world.adaStudentId}/guardians`,
+      admin,
+      {
+        fullName: 'Zeynep Demir',
+        phone: '+905321110071',
+        relation: 'Anne',
+        isPrimary: true,
+        canReceiveChild: true,
+        canAuthorizeTempAddress: true,
+        canSubmitException: true,
+        notifyAm: true,
+        notifyPm: true,
+      },
+    );
+    expect(adaGuardian.status).toBe(200);
+    world.adaGuardianMembershipId = requireString(adaGuardian.body, 'membershipId');
+
+    const canGuardian = await asUser(
+      'POST',
+      `/v1/admin/students/${world.canStudentId}/guardians`,
+      admin,
+      {
+        fullName: 'Mehmet Yılmaz',
+        phone: '+905321110072',
+        relation: 'Baba',
+        isPrimary: true,
+        canReceiveChild: true,
+        canAuthorizeTempAddress: true,
+        canSubmitException: true,
+        notifyAm: true,
+        notifyPm: true,
+      },
+    );
+    expect(canGuardian.status).toBe(200);
+    world.canGuardianMembershipId = requireString(canGuardian.body, 'membershipId');
 
     const adaStop = await asUser('POST', '/v1/admin/stops', admin, {
       addressId: world.adaAddressId,
@@ -2505,7 +2551,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(efe['guardianName']).toBe(GUNES.guardian.fullName);
     expect(efe['deliveryVerified']).toBe(false);
     expect(typeof efe['expectedStopLabel']).toBe('string');
-    expect(ada['guardianPhone']).toBeNull();
+    expect(ada['guardianPhone']).toBe('+905321110071');
+    expect(ada['guardianName']).toBe('Zeynep Demir');
+    expect(Array.isArray(ada['receivers']) ? ada['receivers'].length : 0).toBe(1);
     expect(Array.isArray(students) ? students.length : 0).toBe(2);
 
     const stops = requireStops(detail.body);
@@ -2688,14 +2736,74 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     const completeBlocked = await asUser('POST', `/v1/trips/${tripId}/complete`, hasan);
     expectError(completeBlocked, 409, 'students_still_on_trip');
 
+    const noShowId = randomUUID();
     const noShow = await asUser('POST', `/v1/trips/${tripId}/commands`, hasan, {
-      clientEventId: randomUUID(),
+      clientEventId: noShowId,
       tripStudentId: adaId,
       action: 'MARK_NO_SHOW',
       expectedStateSeq: 0,
     });
     expect(noShow.status).toBe(200);
     expect(noShow.body).toMatchObject({ status: 'APPLIED', state: 'NO_SHOW' });
+
+    const undoNoShow = await asUser('POST', `/v1/trips/${tripId}/commands/undo`, hasan, {
+      clientEventId: randomUUID(),
+      targetClientEventId: noShowId,
+      tripStudentId: adaId,
+    });
+    expect(undoNoShow.status).toBe(200);
+    expect(undoNoShow.body).toMatchObject({ status: 'APPLIED', state: 'EXPECTED' });
+
+    const boardThenUndoId = randomUUID();
+    const undoBeforeBoardId = randomUUID();
+    const undoBeforeBoard = await asUser('POST', `/v1/trips/${tripId}/commands/undo`, hasan, {
+      clientEventId: undoBeforeBoardId,
+      targetClientEventId: boardThenUndoId,
+      tripStudentId: adaId,
+    });
+    expect(undoBeforeBoard.status).toBe(200);
+    expect(undoBeforeBoard.body).toMatchObject({ status: 'PENDING', reason: 'TARGET_NOT_APPLIED' });
+
+    const boardAda = await asUser('POST', `/v1/trips/${tripId}/commands`, hasan, {
+      clientEventId: boardThenUndoId,
+      tripStudentId: adaId,
+      action: 'BOARD',
+      expectedStateSeq: Number(undoNoShow.body['stateSeq']),
+    });
+    expect(boardAda.status).toBe(200);
+    expect(boardAda.body).toMatchObject({ status: 'APPLIED', state: 'ON_BOARD' });
+
+    const afterDrain = await asUser('GET', `/v1/trips/${tripId}`, hasan);
+    expect(studentRow(afterDrain.body['students'], world.adaStudentId)['state']).toBe('EXPECTED');
+
+    const undoReplay = await asUser('POST', `/v1/trips/${tripId}/commands/undo`, hasan, {
+      clientEventId: undoBeforeBoardId,
+      targetClientEventId: boardThenUndoId,
+      tripStudentId: adaId,
+    });
+    expect(undoReplay.status).toBe(200);
+    expect(undoReplay.body).toMatchObject({
+      replay: true,
+      status: 'APPLIED',
+      state: 'EXPECTED',
+    });
+
+    const earlyUndo = await asUser('POST', `/v1/trips/${tripId}/commands/undo`, hasan, {
+      clientEventId: randomUUID(),
+      targetClientEventId: randomUUID(),
+      tripStudentId: adaId,
+    });
+    expect(earlyUndo.status).toBe(200);
+    expect(earlyUndo.body).toMatchObject({ status: 'PENDING', reason: 'TARGET_NOT_APPLIED' });
+
+    const noShowAgain = await asUser('POST', `/v1/trips/${tripId}/commands`, hasan, {
+      clientEventId: randomUUID(),
+      tripStudentId: adaId,
+      action: 'MARK_NO_SHOW',
+      expectedStateSeq: Number(studentRow(afterDrain.body['students'], world.adaStudentId)['stateSeq']),
+    });
+    expect(noShowAgain.status).toBe(200);
+    expect(noShowAgain.body).toMatchObject({ status: 'APPLIED', state: 'NO_SHOW' });
 
     const completeNoSweep = await asUser('POST', `/v1/trips/${tripId}/complete`, hasan);
     expectError(completeNoSweep, 409, 'vehicle_sweep_not_confirmed');
@@ -2876,6 +2984,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       tripStudentId: canId,
       action: 'DELIVER',
       expectedStateSeq: 1,
+      receiverMembershipId: world.canGuardianMembershipId,
     });
     expect(dropped.body).toMatchObject({ status: 'APPLIED', state: 'DELIVERED' });
     const [homeCode] = await postgres.sql<{ delivery_method: string | null }[]>`
@@ -4403,6 +4512,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       tripStudentId,
       action: 'DELIVER',
       expectedStateSeq: Number(afterVerify['stateSeq'] ?? 0),
+      receiverMembershipId: world.guardianMembershipId,
     });
     expect(delivered.status, JSON.stringify(delivered.body)).toBe(200);
     expect(delivered.body['status']).toBe('APPLIED');

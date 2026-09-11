@@ -1,6 +1,6 @@
 import { address, studentAddress, type Database } from '@servisapp/db';
 import { expectedStopKind, type HorizonSegment } from '@servisapp/domain';
-import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 export interface StudentHomePoint {
   lat: number;
@@ -38,7 +38,8 @@ export async function studentHomePoints(
         sql`${studentAddress.validFrom} <= ${onDate}`,
         or(isNull(studentAddress.validTo), sql`${studentAddress.validTo} >= ${onDate}`),
       ),
-    );
+    )
+    .orderBy(desc(studentAddress.validFrom), desc(studentAddress.id));
   const grouped = new Map<string, typeof rows>();
   for (const row of rows) {
     const list = grouped.get(row.studentId) ?? [];

@@ -9,7 +9,7 @@ import type {
   PlatformConfig,
   SessionSnapshot,
 } from '@servisapp/contracts';
-import { hasUsableCoordinates } from '@servisapp/domain';
+import { hasUsableCoordinates, ymdInTimeZone } from '@servisapp/domain';
 import {
   address,
   createDbFromSql,
@@ -18,6 +18,7 @@ import {
   staffAssignment,
   student,
   studentAddress,
+  tenant,
   tenantMembership,
   vehicle,
   withTenant,
@@ -35,13 +36,17 @@ import { createRouteAdminPort } from './route-admin.js';
 import {
   endStudentTx,
   getStudentTx,
+  listStaffDevicesTx,
   listStaffTx,
   listStudentsTx,
+  revokeDeviceTx,
   revokeGuardianTx,
+  setStaffStatusTx,
 } from './students-admin.js';
 import { MemoryRealtimeTransport } from '../realtime/memory.js';
 import { createTrackingPort } from './tracking.js';
 import { createTripPort } from './trips.js';
+import { createDevicePort } from './devices.js';
 import { createExceptionsPort } from './exceptions.js';
 import { createOperationsPort } from './operations.js';
 
@@ -87,6 +92,7 @@ function resolveOnboardingOptions(options?: PostgresDataOptions): OnboardingOpti
   }
   return {
     invitePepper,
+    encryptionKey: resolveOtpEncryptionKey(options),
     publicAppUrl: (options?.publicAppUrl ?? process.env['ADMIN_PUBLIC_URL'] ?? '').replace(
       /\/$/,
       '',
@@ -116,7 +122,7 @@ export function createPostgresData(
   const onboardingOptions = resolveOnboardingOptions(options);
   const exceptions = createExceptionsPort(db, {
     pepper: onboardingOptions.invitePepper,
-    encryptionKey: resolveOtpEncryptionKey(options),
+    encryptionKey: onboardingOptions.encryptionKey,
   });
   const tripCore = createTripPort(db, {
     onClosed: (tripId) => realtime.publishEnded(tripId),
@@ -235,6 +241,7 @@ export function createPostgresData(
       rejectAddressChange: (tenantId, membershipId, requestId) =>
         exceptions.rejectAddressChange(tenantId, membershipId, requestId),
     },
+    devices: createDevicePort(db),
     realtime: {
       vehicleBroadcasts: (tripId) => realtime.vehicleBroadcasts(tripId),
       endedTripIds: () => realtime.endedTripIds(),
@@ -377,6 +384,9 @@ type SetupAdmin = Pick<
   | 'listVehicles'
   | 'createStaff'
   | 'listStaff'
+  | 'setStaffStatus'
+  | 'listStaffDevices'
+  | 'revokeDevice'
   | 'createStudent'
   | 'listStudents'
   | 'getStudent'
@@ -384,6 +394,7 @@ type SetupAdmin = Pick<
   | 'createGuardian'
   | 'revokeGuardian'
   | 'createHoliday'
+  | 'serviceDateToday'
 >;
 
 function createAdminPort(db: Database): SetupAdmin {
@@ -513,6 +524,32 @@ function createAdminPort(db: Database): SetupAdmin {
 
     listStaff(tenantId) {
       return withAdmin(db, tenantId, '', (tx) => listStaffTx(tx, tenantId));
+    },
+
+    setStaffStatus(tenantId, membershipId, status) {
+      return withAdmin(db, tenantId, '', (tx) =>
+        setStaffStatusTx(tx, tenantId, membershipId, status),
+      );
+    },
+
+    listStaffDevices(tenantId, membershipId) {
+      return withAdmin(db, tenantId, '', (tx) =>
+        listStaffDevicesTx(tx, tenantId, membershipId),
+      );
+    },
+
+    revokeDevice(tenantId, deviceId) {
+      return withAdmin(db, tenantId, '', (tx) => revokeDeviceTx(tx, tenantId, deviceId));
+    },
+
+    async serviceDateToday(tenantId) {
+      return withAdmin(db, tenantId, '', async (tx) => {
+        const [row] = await tx
+          .select({ timezone: tenant.timezone })
+          .from(tenant)
+          .where(eq(tenant.id, tenantId));
+        return ymdInTimeZone(new Date(), row?.timezone ?? 'Europe/Istanbul');
+      });
     },
 
     createStudent(tenantId, input: CreateStudentInput) {

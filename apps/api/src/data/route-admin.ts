@@ -5,6 +5,18 @@ import type {
   ReplaceRouteStopsInput,
 } from '@servisapp/contracts';
 import {
+  evaluateRouteCapacity,
+  evaluateRoutePlan,
+  exhaustive,
+  hasUsableCoordinates,
+  isEnrollmentEnded,
+  suggestWaypointOrder,
+  ymdInTimeZone,
+  type RoutePlanIssue,
+  type RoutePlanStop,
+  type RouteSegment,
+} from '@servisapp/domain';
+import {
   address,
   route,
   routeStop,
@@ -13,20 +25,11 @@ import {
   school,
   stop,
   student,
+  tenant,
   vehicle,
   withTenant,
   type Database,
 } from '@servisapp/db';
-import {
-  evaluateRouteCapacity,
-  evaluateRoutePlan,
-  exhaustive,
-  hasUsableCoordinates,
-  suggestWaypointOrder,
-  type RoutePlanIssue,
-  type RoutePlanStop,
-  type RouteSegment,
-} from '@servisapp/domain';
 import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { badRequest, conflict, HttpError, notFound } from '../http-error.js';
 import { mapDbError } from './db-error.js';
@@ -457,7 +460,12 @@ async function assertStopsAndStudents(
   if (foundStudents.some((item) => item.schoolId !== schoolId)) {
     throw badRequest('student_wrong_school', 'Öğrenci bu rotanın okuluna kayıtlı değil');
   }
-  if (foundStudents.some((item) => item.enrollmentEnd)) {
+  const [zoneRow] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
+  const asOf = ymdInTimeZone(new Date(), zoneRow?.timezone ?? 'Europe/Istanbul');
+  if (foundStudents.some((item) => isEnrollmentEnded(item.enrollmentEnd, asOf))) {
     throw badRequest('student_ended', 'Pasif öğrenci rotaya yazılmaz');
   }
   switch (segment) {
@@ -521,7 +529,12 @@ async function assertPublishGuards(
   if (enrolled.length !== studentIds.length) {
     throw badRequest('student_not_found', 'Rotadaki öğrenci bulunamadı');
   }
-  if (enrolled.some((item) => item.enrollmentEnd)) {
+  const [zoneRow] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
+  const asOf = ymdInTimeZone(new Date(), zoneRow?.timezone ?? 'Europe/Istanbul');
+  if (enrolled.some((item) => isEnrollmentEnded(item.enrollmentEnd, asOf))) {
     throw badRequest('student_ended', 'Pasif öğrenci yayınlı rotada olamaz');
   }
   if (enrolled.some((item) => item.suspended)) {

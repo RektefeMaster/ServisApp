@@ -4,6 +4,9 @@ primary_region = "fra"   # Supabase EU bölgesine komşu
 [build]
   dockerfile = "Dockerfile"
 
+[deploy]
+  release_command = "node dist/migrate-release.js"
+
 [env]
   NODE_ENV = "production"
   PORT = "3000"

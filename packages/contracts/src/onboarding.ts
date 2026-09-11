@@ -20,7 +20,7 @@ export type ImportRowStatus = z.infer<typeof importRowStatus>;
 export const inviteStatus = z.enum(['PENDING', 'USED', 'EXPIRED', 'REVOKED']);
 export type InviteStatus = z.infer<typeof inviteStatus>;
 
-export const smsDeliveryStatus = z.enum(['QUEUED', 'SENT', 'DELIVERED', 'FAILED']);
+export const smsDeliveryStatus = z.enum(['QUEUED', 'SENT', 'DELIVERED', 'FAILED', 'CANCELLED']);
 export type SmsDeliveryStatus = z.infer<typeof smsDeliveryStatus>;
 
 export const importRowInput = z.object({

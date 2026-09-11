@@ -1,4 +1,5 @@
 import {
+  device,
   guardianInvite,
   identity,
   inviteSms,
@@ -6,14 +7,15 @@ import {
   school,
   student,
   studentGuardian,
+  tenant,
   tenantMembership,
   trip,
   tripStudent,
   type Database,
 } from '@servisapp/db';
-import { occupiesVehicle } from '@servisapp/domain';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import { conflict, notFound } from '../http-error.js';
+import { occupiesVehicle, ymdInTimeZone } from '@servisapp/domain';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { badRequest, conflict, notFound } from '../http-error.js';
 import { loadAssignments, loadPinnedUsages, planForStudent } from './plan-query.js';
 import { applyTripStudentPlan, requirePlanApplied } from './plan-reconcile.js';
 import type { StaffListItem, StudentGuardianView, StudentListItem } from './ports.js';
@@ -90,6 +92,11 @@ export async function listStudentsTx(
   const assignments = await loadAssignments(tx, tenantId, ids);
   const pinned = await loadPinnedUsages(tx, tenantId, ids);
   const guardians = await loadGuardians(tx, tenantId, ids);
+  const [tenantRow] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
+  const asOf = ymdInTimeZone(new Date(), tenantRow?.timezone ?? 'Europe/Istanbul');
 
   return rows.map((row) => {
     const plan = planForStudent(
@@ -101,6 +108,7 @@ export async function listStudentsTx(
       },
       assignments.get(row.id) ?? [],
       pinned.has(row.id),
+      asOf,
     );
     return {
       id: row.id,
@@ -135,7 +143,15 @@ export async function endStudentTx(
   studentId: string,
   enrollmentEnd: string,
 ): Promise<{ id: string; enrollmentEnd: string }> {
-  await dropStudentFromOpenTrips(tx, tenantId, studentId);
+  const [tenantRow] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
+  const today = ymdInTimeZone(new Date(), tenantRow?.timezone ?? 'Europe/Istanbul');
+  if (enrollmentEnd < today) {
+    throw badRequest('past_enrollment_end', 'Kayıt bitişi geçmiş olamaz');
+  }
+  await dropStudentFromOpenTrips(tx, tenantId, studentId, enrollmentEnd);
   const [row] = await tx
     .update(student)
     .set({ enrollmentEnd })
@@ -149,12 +165,14 @@ async function dropStudentFromOpenTrips(
   tx: Database,
   tenantId: string,
   studentId: string,
+  enrollmentEnd: string,
 ): Promise<void> {
   const rows = await tx
     .select({
       tripStudentId: tripStudent.id,
       tripId: trip.id,
       state: tripStudent.state,
+      serviceDate: trip.serviceDate,
     })
     .from(tripStudent)
     .innerJoin(trip, and(eq(trip.id, tripStudent.tripId), eq(trip.tenantId, tenantId)))
@@ -163,6 +181,7 @@ async function dropStudentFromOpenTrips(
         eq(tripStudent.tenantId, tenantId),
         eq(tripStudent.studentId, studentId),
         inArray(trip.state, ['PLANNED', 'READY', 'ACTIVE']),
+        sql`${trip.serviceDate} > ${enrollmentEnd}`,
       ),
     );
   const tripIds = [...new Set(rows.map((row) => row.tripId))].sort();
@@ -191,6 +210,7 @@ async function dropStudentFromOpenTrips(
               eq(tripStudent.tenantId, tenantId),
               eq(tripStudent.studentId, studentId),
               inArray(trip.state, ['PLANNED', 'READY', 'ACTIVE']),
+              sql`${trip.serviceDate} > ${enrollmentEnd}`,
             ),
           );
   if (locked.some((row) => occupiesVehicle(row.state))) {
@@ -286,7 +306,7 @@ async function loadLatestInvites(
     {
       inviteId: string;
       status: 'PENDING' | 'USED' | 'EXPIRED' | 'REVOKED';
-      smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | null;
+      smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'CANCELLED' | null;
     }
   >
 > {
@@ -295,7 +315,7 @@ async function loadLatestInvites(
     {
       inviteId: string;
       status: 'PENDING' | 'USED' | 'EXPIRED' | 'REVOKED';
-      smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | null;
+      smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'CANCELLED' | null;
     }
   >();
   if (membershipIds.length === 0) return map;
@@ -319,7 +339,7 @@ async function loadLatestInvites(
     if (!latest.has(invite.membershipId)) latest.set(invite.membershipId, invite);
   }
   const inviteIds = [...latest.values()].map((item) => item.id);
-  const smsByInvite = new Map<string, 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED'>();
+  const smsByInvite = new Map<string, 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'CANCELLED'>();
   if (inviteIds.length > 0) {
     const smsRows = await tx
       .select({
@@ -342,4 +362,73 @@ async function loadLatestInvites(
     });
   }
   return map;
+}
+
+export async function setStaffStatusTx(
+  tx: Database,
+  tenantId: string,
+  membershipId: string,
+  status: 'ACTIVE' | 'SUSPENDED' | 'REVOKED',
+): Promise<StaffListItem> {
+  const [row] = await tx
+    .update(tenantMembership)
+    .set({ status })
+    .where(and(eq(tenantMembership.id, membershipId), eq(tenantMembership.tenantId, tenantId)))
+    .returning({ id: tenantMembership.id });
+  if (!row) throw notFound('Personel bulunamadı');
+  if (status === 'REVOKED' || status === 'SUSPENDED') {
+    await tx
+      .update(device)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(device.tenantId, tenantId),
+          eq(device.membershipId, membershipId),
+          isNull(device.revokedAt),
+        ),
+      );
+  }
+  const items = await listStaffTx(tx, tenantId);
+  const item = items.find((entry) => entry.membershipId === membershipId);
+  if (!item) throw notFound('Personel bulunamadı');
+  return item;
+}
+
+export async function revokeDeviceTx(
+  tx: Database,
+  tenantId: string,
+  deviceId: string,
+): Promise<{ ok: true }> {
+  const [row] = await tx
+    .update(device)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(device.id, deviceId), eq(device.tenantId, tenantId), isNull(device.revokedAt)))
+    .returning({ id: device.id });
+  if (!row) throw notFound('Cihaz bulunamadı');
+  return { ok: true as const };
+}
+
+export async function listStaffDevicesTx(
+  tx: Database,
+  tenantId: string,
+  membershipId: string,
+): Promise<
+  Array<{ deviceId: string; platform: string; revokedAt: string | null; lastSyncAt: string | null }>
+> {
+  const rows = await tx
+    .select({
+      deviceId: device.id,
+      platform: device.platform,
+      revokedAt: device.revokedAt,
+      lastSyncAt: device.lastSyncAt,
+    })
+    .from(device)
+    .where(and(eq(device.tenantId, tenantId), eq(device.membershipId, membershipId)))
+    .orderBy(desc(device.lastSyncAt));
+  return rows.map((row) => ({
+    deviceId: row.deviceId,
+    platform: row.platform,
+    revokedAt: row.revokedAt?.toISOString() ?? null,
+    lastSyncAt: row.lastSyncAt?.toISOString() ?? null,
+  }));
 }

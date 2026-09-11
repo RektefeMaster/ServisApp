@@ -22,6 +22,7 @@ import {
 } from '@servisapp/db';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { conflict, HttpError, notFound } from '../http-error.js';
+import { encryptDeliveryOtp, decryptDeliveryOtp } from '../crypto/delivery-otp.js';
 import { attachMembership, findIdentityByPhone, identityBelongsToTenant, resolveGuardianIdentity } from './identity-write.js';
 import { hashInviteToken, inviteExpiresAt, newInviteToken, phoneHint } from './invite-token.js';
 import { loadParentChildren } from './plan-query.js';
@@ -37,6 +38,7 @@ import { mapDbError } from './db-error.js';
 
 export interface OnboardingOptions {
   invitePepper: string;
+  encryptionKey: string;
   publicAppUrl: string;
   revealInviteSecrets: boolean;
 }
@@ -249,13 +251,27 @@ export function createOnboarding(db: Database, options: OnboardingOptions) {
         if (recentSms) {
           throw conflict('sms_rate_limited', 'SMS en fazla 90 saniyede bir gönderilir');
         }
+        const packed = asInviteBuffer(invite.tokenCiphertext);
+        if (!packed) {
+          throw conflict('invite_token_unavailable', 'Davet bağlantısı SMS için çözülemiyor');
+        }
+        let token: string;
+        try {
+          token = decryptDeliveryOtp(packed, options.encryptionKey);
+        } catch {
+          throw new HttpError(500, 'invite_decrypt_failed', 'Davet bağlantısı çözülemedi');
+        }
         const [sms] = await tx
           .insert(inviteSms)
           .values({
             tenantId,
             inviteId,
             status: 'QUEUED',
-            provider: 'dev',
+            provider: 'netgsm',
+            bodyCiphertext: encryptDeliveryOtp(
+              invitePublicUrl(options.publicAppUrl, token),
+              options.encryptionKey,
+            ),
           })
           .returning({ id: inviteSms.id });
         if (!sms) throw new HttpError(500, 'insert_failed', 'SMS kuyruğa alınamadı');
@@ -751,6 +767,7 @@ async function insertInvite(
       identityId: membership.identityId,
       membershipId,
       tokenHash: hashInviteToken(token, options.invitePepper),
+      tokenCiphertext: encryptDeliveryOtp(token, options.encryptionKey),
       status: 'PENDING',
       expiresAt: inviteExpiresAt(),
       createdByMembershipId: actorMembershipId,
@@ -832,4 +849,11 @@ async function lookupInvite(
     phone: asText(found['phone']),
     fullName: asText(found['fullName']),
   };
+}
+
+function asInviteBuffer(value: unknown): Buffer | null {
+  if (value === null || value === undefined) return null;
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  return null;
 }

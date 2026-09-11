@@ -54,9 +54,17 @@ export async function openOutbox(): Promise<void> {
         status text not null,
         conflict_state text,
         conflict_state_seq integer,
-        reject_reason text
+        reject_reason text,
+        receiver_membership_id text
       );
     `);
+    try {
+      await db.execAsync(
+        'alter table outbox add column receiver_membership_id text',
+      );
+    } catch {
+      // kolon zaten var
+    }
     const rows = await db.getAllAsync<OutboxRow>('select * from outbox order by device_seq asc');
     const loaded = rows.flatMap((row) => {
       const item = fromRow(row);
@@ -143,6 +151,9 @@ export async function flushOutbox(session: CrewSession): Promise<FlushOutcome> {
           expectedStateSeq: item.expectedStateSeq,
           deviceSeq: item.deviceSeq,
           occurredAtDevice: item.occurredAtDevice,
+          ...(item.receiverMembershipId
+            ? { receiverMembershipId: item.receiverMembershipId }
+            : {}),
         });
         const next = applyServerResult(item, result);
         if (next.status === 'APPLIED') {
@@ -189,6 +200,7 @@ interface OutboxRow {
   conflict_state: string | null;
   conflict_state_seq: number | null;
   reject_reason: string | null;
+  receiver_membership_id: string | null;
 }
 
 function coerceItem(value: unknown): OutboxItem | null {
@@ -219,6 +231,8 @@ function coerceItem(value: unknown): OutboxItem | null {
     conflictState: (row.conflictState ?? row.conflict_state ?? undefined) as OutboxItem['conflictState'],
     conflictStateSeq: row.conflictStateSeq ?? row.conflict_state_seq ?? undefined,
     rejectReason: row.rejectReason ?? row.reject_reason ?? undefined,
+    receiverMembershipId:
+      (row.receiverMembershipId ?? row.receiver_membership_id ?? undefined) || undefined,
   };
 }
 
@@ -238,8 +252,9 @@ async function persist(item: OutboxItem): Promise<void> {
   await db.runAsync(
     `insert or replace into outbox (
       client_event_id, trip_id, trip_student_id, action, expected_state_seq,
-      device_seq, occurred_at_device, status, conflict_state, conflict_state_seq, reject_reason
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      device_seq, occurred_at_device, status, conflict_state, conflict_state_seq, reject_reason,
+      receiver_membership_id
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     item.clientEventId,
     item.tripId,
     item.tripStudentId,
@@ -251,6 +266,7 @@ async function persist(item: OutboxItem): Promise<void> {
     item.conflictState ?? null,
     item.conflictStateSeq ?? null,
     item.rejectReason ?? null,
+    item.receiverMembershipId ?? null,
   );
 }
 

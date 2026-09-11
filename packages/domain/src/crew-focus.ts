@@ -31,6 +31,7 @@ export interface CrewStudent {
   stateSeq: number;
   deliveryTarget: DeliveryTarget;
   deliveryVerified: boolean;
+  handoverPolicy?: 'GUARDIAN_REQUIRED' | 'MAY_LEAVE_ALONE';
   expectedStopId: string | null;
   needsReview: boolean;
 }
@@ -117,6 +118,7 @@ export function crewActionsForStudent(
   student: CrewStudent,
   tripState: TripState,
   actorRole: ActorRole,
+  receiverMembershipId?: string | null,
 ): StudentAction[] {
   const candidates: StudentAction[] = [
     'BOARD',
@@ -134,6 +136,8 @@ export function crewActionsForStudent(
         actorRole,
         deliveryTarget: student.deliveryTarget,
         deliveryVerified: student.deliveryVerified,
+        handoverPolicy: student.handoverPolicy,
+        receiverMembershipId,
       }).ok,
   );
 }

@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { randomUUID } from 'expo-crypto';
 import * as Linking from 'expo-linking';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -18,14 +19,17 @@ import {
   asStudentState,
   crewActionsForStudent,
   exhaustive,
+  isUndoableStudentAction,
   reconcileStudentFromServer,
   tripFocus,
   tripGate,
+  UNDO_WINDOW_MS,
   type ActorRole,
   type CrewStudent,
   type CrewTripView,
   type OutboxItem,
   type StudentAction,
+  type StudentState,
   type TripGate,
 } from '@servisapp/domain';
 import { colors, space } from '@servisapp/ui';
@@ -34,6 +38,7 @@ import {
   ackCriticalAlert,
   completeTrip,
   getTrip,
+  postUndo,
   recordVehicleCheck,
   reportIncident,
   startTrip,
@@ -48,6 +53,7 @@ import {
   enqueueCommand,
   flushOutbox,
   hasOpenCommands,
+  listOutbox,
   pendingConflicts,
   pendingRejected,
   removeOutbox,
@@ -72,9 +78,31 @@ function toCrewStudent(row: TripStudentView): CrewStudent {
     stateSeq: row.stateSeq,
     deliveryTarget: row.deliveryTarget,
     deliveryVerified: row.deliveryVerified,
+    handoverPolicy: row.handoverPolicy,
     expectedStopId: row.expectedStopId,
     needsReview: row.needsReview,
   };
+}
+
+function preferredReceiverId(student: TripStudentView): string | undefined {
+  if (student.deliveryTarget === 'SCHOOL') return undefined;
+  if (student.handoverPolicy !== 'GUARDIAN_REQUIRED') return undefined;
+  // Tek yetkili varsa attestation net; birden fazlaysa seçim zorunlu.
+  if (student.receivers.length === 1) return student.receivers[0]?.membershipId;
+  return undefined;
+}
+
+function needsReceiverPick(student: TripStudentView, action: StudentAction): boolean {
+  if (
+    action !== 'DELIVER' &&
+    action !== 'RETURN_HOME' &&
+    action !== 'RESOLVE_DELIVERED_LATE'
+  ) {
+    return false;
+  }
+  if (student.deliveryTarget === 'SCHOOL') return false;
+  if (student.handoverPolicy !== 'GUARDIAN_REQUIRED') return false;
+  return student.receivers.length > 1;
 }
 
 function actorRoleOf(roles: CrewSession['roles']): ActorRole {
@@ -99,6 +127,59 @@ function gateButtonLabel(gate: TripGate): string | null {
       return exhaustive(unexpected, 'gateButtonLabel');
     }
   }
+}
+
+type LastTap = {
+  clientEventId: string;
+  tripStudentId: string;
+  action: StudentAction;
+  at: number;
+  prevState: StudentState;
+  prevStateSeq: number;
+};
+
+function lastTapStorageKey(tripId: string): string {
+  return `crew.lastTap.${tripId}`;
+}
+
+function parseLastTap(raw: string | null): LastTap | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<LastTap>;
+    if (
+      typeof parsed.clientEventId !== 'string' ||
+      typeof parsed.tripStudentId !== 'string' ||
+      typeof parsed.action !== 'string' ||
+      typeof parsed.at !== 'number' ||
+      typeof parsed.prevState !== 'string' ||
+      typeof parsed.prevStateSeq !== 'number'
+    ) {
+      return null;
+    }
+    if (!isUndoableStudentAction(parsed.action)) return null;
+    if (Date.now() - parsed.at > UNDO_WINDOW_MS) return null;
+    const prevState = asStudentState(parsed.prevState);
+    if (!prevState) return null;
+    return {
+      clientEventId: parsed.clientEventId,
+      tripStudentId: parsed.tripStudentId,
+      action: parsed.action,
+      at: parsed.at,
+      prevState,
+      prevStateSeq: parsed.prevStateSeq,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function persistLastTap(tripId: string, tap: LastTap | null): Promise<void> {
+  const key = lastTapStorageKey(tripId);
+  if (!tap) {
+    await AsyncStorage.removeItem(key);
+    return;
+  }
+  await AsyncStorage.setItem(key, JSON.stringify(tap));
 }
 
 async function openNavigation(lat: number, lng: number, label: string): Promise<void> {
@@ -129,12 +210,17 @@ export function TripScreen({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [offline, setOffline] = useState(false);
-  const [overlay, setOverlay] = useState<'list' | 'incident' | 'otp' | 'none'>('none');
+  const [overlay, setOverlay] = useState<'list' | 'incident' | 'otp' | 'receiver' | 'none'>('none');
+  const [pendingReceiverAction, setPendingReceiverAction] = useState<{
+    student: TripStudentView;
+    action: StudentAction;
+  } | null>(null);
   const [otpCode, setOtpCode] = useState('');
   const [incidentBody, setIncidentBody] = useState('');
   const [conflict, setConflict] = useState<OutboxItem | null>(null);
   const [focusStudentId, setFocusStudentId] = useState<string | null>(null);
   const [queueTick, setQueueTick] = useState(0);
+  const [lastTap, setLastTap] = useState<LastTap | null>(null);
   const actionLock = useRef(false);
   const detailRef = useRef<TripDetail | null>(null);
   detailRef.current = detail;
@@ -168,6 +254,14 @@ export function TripScreen({
     });
   }, [reload]);
 
+  useEffect(() => {
+    void AsyncStorage.getItem(lastTapStorageKey(tripId)).then((raw) => {
+      const parsed = parseLastTap(raw);
+      setLastTap(parsed);
+      if (!parsed) void AsyncStorage.removeItem(lastTapStorageKey(tripId));
+    });
+  }, [tripId]);
+
   const crew = useMemo(() => (detail ? asCrewTrip(detail) : null), [detail]);
   const focus = crew ? tripFocus(crew) : null;
   const gate = crew ? tripGate(crew) : null;
@@ -186,7 +280,13 @@ export function TripScreen({
 
   const actions =
     activeStudent && crew
-      ? crewActionsForStudent(toCrewStudent(activeStudent), crew.state, role)
+      ? crewActionsForStudent(
+          toCrewStudent(activeStudent),
+          crew.state,
+          role,
+          // Butonları göstermek için geçici alıcı; asıl seçim queueAction'da.
+          preferredReceiverId(activeStudent) ?? activeStudent.receivers[0]?.membershipId,
+        )
       : [];
 
   async function syncQueue(): Promise<void> {
@@ -222,9 +322,11 @@ export function TripScreen({
       setError(
         mineRejected.rejectReason === 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE'
           ? 'Farklı adres — velinin kodunu gir'
-          : mineRejected.rejectReason === 'CRITICAL_CHANGE_UNACKED'
-            ? 'Kritik değişiklik: onaylamadan komut yok'
-            : 'Bu işlem sunucuda reddedildi',
+          : mineRejected.rejectReason === 'GUARDIAN_RECEIVER_REQUIRED'
+            ? 'Teslim alan yetkili veli seçilmeli'
+            : mineRejected.rejectReason === 'CRITICAL_CHANGE_UNACKED'
+              ? 'Kritik değişiklik: onaylamadan komut yok'
+              : 'Bu işlem sunucuda reddedildi',
       );
       await dropPendingFor(mineRejected.tripStudentId);
       await removeOutbox(mineRejected.clientEventId);
@@ -243,18 +345,50 @@ export function TripScreen({
   }
 
   async function queueAction(student: TripStudentView, action: StudentAction): Promise<void> {
+    if (needsReceiverPick(student, action)) {
+      setPendingReceiverAction({ student, action });
+      setOverlay('receiver');
+      return;
+    }
+    await queueActionWithReceiver(student, action, preferredReceiverId(student));
+  }
+
+  async function queueActionWithReceiver(
+    student: TripStudentView,
+    action: StudentAction,
+    receiverMembershipId: string | undefined,
+  ): Promise<void> {
     const current = detailRef.current;
     if (!current || actionLock.current) return;
     actionLock.current = true;
     setError(null);
     try {
       const live = current.students.find((row) => row.id === student.id) ?? student;
-      const optimistic = applyOptimistic(toCrewStudent(live), action, current.state, role);
+      if (
+        (action === 'DELIVER' ||
+          action === 'RETURN_HOME' ||
+          action === 'RESOLVE_DELIVERED_LATE') &&
+        live.deliveryTarget !== 'SCHOOL' &&
+        live.handoverPolicy === 'GUARDIAN_REQUIRED' &&
+        !receiverMembershipId
+      ) {
+        setError('Teslim alan yetkili veli tanımlı değil');
+        return;
+      }
+      const optimistic = applyOptimistic(
+        toCrewStudent(live),
+        action,
+        current.state,
+        role,
+        receiverMembershipId,
+      );
       if (!optimistic.ok) {
         setError(
           optimistic.reason === 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE'
             ? 'Farklı adres — velinin kodunu gir'
-            : 'Bu işlem şimdi yapılamaz',
+            : optimistic.reason === 'GUARDIAN_RECEIVER_REQUIRED'
+              ? 'Teslim alan yetkili veli seçilmeli'
+              : 'Bu işlem şimdi yapılamaz',
         );
         if (optimistic.reason === 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE') {
           setOverlay('otp');
@@ -276,6 +410,19 @@ export function TripScreen({
         action,
         expectedStateSeq: live.stateSeq,
         occurredAtDevice: new Date().toISOString().replace('Z', '+00:00'),
+        ...(receiverMembershipId ? { receiverMembershipId } : {}),
+      }).then((item) => {
+        const tap: LastTap = {
+          clientEventId: item.clientEventId,
+          tripStudentId: live.id,
+          action,
+          at: Date.now(),
+          prevState: live.state,
+          prevStateSeq: live.stateSeq,
+        };
+        setLastTap(tap);
+        void persistLastTap(tripId, tap);
+        return item;
       });
       bumpQueue();
       try {
@@ -294,6 +441,66 @@ export function TripScreen({
       } catch (reloadCaught) {
         failFrom(reloadCaught, 'Sefer yüklenemedi');
       }
+    } finally {
+      actionLock.current = false;
+    }
+  }
+
+  async function undoLast(): Promise<void> {
+    if (!lastTap || Date.now() - lastTap.at > UNDO_WINDOW_MS) return;
+    if (actionLock.current) return;
+    actionLock.current = true;
+    setError(null);
+    try {
+      const queued = listOutbox().find((item) => item.clientEventId === lastTap.clientEventId);
+      if (queued?.status === 'PENDING') {
+        const current = detailRef.current;
+        if (current) {
+          setDetail({
+            ...current,
+            students: current.students.map((row) =>
+              row.id === lastTap.tripStudentId
+                ? { ...row, state: lastTap.prevState, stateSeq: lastTap.prevStateSeq }
+                : row,
+            ),
+          });
+        }
+        await removeOutbox(lastTap.clientEventId);
+        setLastTap(null);
+        await persistLastTap(tripId, null);
+        bumpQueue();
+        try {
+          await reload();
+        } catch (caught) {
+          if (caught instanceof ApiError && caught.code === 'offline') {
+            setOffline(true);
+            return;
+          }
+          failFrom(caught, 'Sefer yüklenemedi');
+        }
+        return;
+      }
+      if (queued?.status === 'IN_FLIGHT') {
+        setError('Komut hâlâ gönderiliyor; bitince geri al');
+        return;
+      }
+      const result = await postUndo(session, tripId, {
+        clientEventId: randomUUID(),
+        targetClientEventId: lastTap.clientEventId,
+        tripStudentId: lastTap.tripStudentId,
+      });
+      if (result.status === 'REJECTED') {
+        setError('Bu işlem geri alınamaz');
+      } else if (result.status === 'PENDING') {
+        setError('İşlem henüz işlenmedi; işaretlenince geri alınacak');
+      } else if (result.status === 'CONFLICT') {
+        setError('Durum değişmiş, sefer yenilendi');
+      }
+      setLastTap(null);
+      await persistLastTap(tripId, null);
+      await reload();
+    } catch (caught) {
+      failFrom(caught, 'Geri alma başarısız');
     } finally {
       actionLock.current = false;
     }
@@ -482,6 +689,14 @@ export function TripScreen({
               </Pressable>
             ))}
           </View>
+          {lastTap &&
+          lastTap.tripStudentId === activeStudent.id &&
+          isUndoableStudentAction(lastTap.action) &&
+          Date.now() - lastTap.at < UNDO_WINDOW_MS ? (
+            <Pressable disabled={busy || Boolean(blockingAlert)} onPress={() => void undoLast()} style={styles.gate}>
+              <Text style={styles.gateText}>Son işlemi geri al</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : (
         <Text style={styles.empty}>Bu durakta işaretlenecek öğrenci kalmadı.</Text>
@@ -581,6 +796,43 @@ export function TripScreen({
             <Text style={styles.gateText}>Doğrula</Text>
           </Pressable>
         </View>
+      </Modal>
+
+      <Modal visible={overlay === 'receiver'} animationType="slide">
+        <ScrollView style={styles.screen} contentContainerStyle={{ padding: space.lg, paddingTop: 56 }}>
+          <Pressable
+            onPress={() => {
+              setPendingReceiverAction(null);
+              setOverlay('none');
+            }}
+          >
+            <Text style={styles.back}>← Sefer</Text>
+          </Pressable>
+          <Text style={styles.name}>Teslim alan kişi</Text>
+          <Text style={styles.stop}>Kapıdaki yetkili velini seç.</Text>
+          {(pendingReceiverAction?.student.receivers ?? []).map((receiver) => (
+            <Pressable
+              key={receiver.membershipId}
+              disabled={busy}
+              onPress={() => {
+                const pending = pendingReceiverAction;
+                setPendingReceiverAction(null);
+                setOverlay('none');
+                if (pending) {
+                  void queueActionWithReceiver(
+                    pending.student,
+                    pending.action,
+                    receiver.membershipId,
+                  );
+                }
+              }}
+              style={styles.row}
+            >
+              <Text style={styles.rowName}>{receiver.fullName}</Text>
+              <Text style={styles.rowMeta}>{receiver.relation}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
       </Modal>
 
       <Modal visible={blockingAlert !== null} animationType="fade" transparent>

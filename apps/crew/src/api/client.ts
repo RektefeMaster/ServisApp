@@ -10,6 +10,7 @@ import {
   type PlatformConfig,
   type ReportIncidentInput,
   type StudentCommandInput,
+  type UndoStudentCommandInput,
   type TripDetail,
   type TripSummary,
 } from '@servisapp/contracts';
@@ -199,6 +200,15 @@ export async function postCommand(
   input: StudentCommandInput,
 ): Promise<CommandResult> {
   const payload = await request('POST', `/v1/trips/${tripId}/commands`, session, input);
+  return commandResult.parse(payload);
+}
+
+export async function postUndo(
+  session: CrewSession,
+  tripId: string,
+  input: UndoStudentCommandInput,
+): Promise<CommandResult> {
+  const payload = await request('POST', `/v1/trips/${tripId}/commands/undo`, session, input);
   return commandResult.parse(payload);
 }
 

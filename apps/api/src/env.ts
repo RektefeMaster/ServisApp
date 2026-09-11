@@ -47,6 +47,18 @@ const schema = z.object({
     (value) => (value === '' || value === undefined ? undefined : value),
     z.string().min(8).optional(),
   ),
+  NETGSM_USERCODE: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.string().min(1).optional(),
+  ),
+  NETGSM_PASSWORD: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.string().min(1).optional(),
+  ),
+  NETGSM_MSGHEADER: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.string().min(1).optional(),
+  ),
   /**
    * Güvenilen vekil IP/CIDR listesi. `true`, `1` ve hop-count (sayı) reddedilir:
    * Fastify CVE-2026-16732 hop-count XFF sahteciliğine izin verir.

@@ -81,6 +81,16 @@ export const createStaffInput = z.object({
 });
 export type CreateStaffInput = z.infer<typeof createStaffInput>;
 
+export const setStaffStatusInput = z.object({
+  status: z.enum(['ACTIVE', 'SUSPENDED', 'REVOKED']),
+});
+export type SetStaffStatusInput = z.infer<typeof setStaffStatusInput>;
+
+export const revokeDeviceInput = z.object({
+  deviceId: uuid,
+});
+export type RevokeDeviceInput = z.infer<typeof revokeDeviceInput>;
+
 export const createStudentInput = z.object({
   fullName: z.string().trim().min(2).max(200),
   schoolId: uuid,

@@ -17,7 +17,6 @@ import {
   criticalChangeAck,
   criticalChangeAlert,
   deliveryOverride,
-  notification,
   platformSettings,
   rideException,
   route,
@@ -32,6 +31,8 @@ import {
   type Database,
 } from '@servisapp/db';
 import {
+  canGuardianManageDeliveryOverride,
+  canGuardianViewDeliveryOtp,
   canResendOtp,
   detourDecision,
   exhaustive,
@@ -53,6 +54,7 @@ import {
 } from '../crypto/delivery-otp.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http-error.js';
 import { isUniqueViolation, mapDbError } from './db-error.js';
+import { queueGuardianNotifications } from './notify-queue.js';
 import {
   applyTripStudentPlan,
   cancelActiveOverrides,
@@ -185,32 +187,18 @@ async function notifyGuardians(
   type: string,
   dedupe: string,
   channel: 'PUSH' | 'SMS' = 'PUSH',
+  extra?: { tripId?: string | null; refId?: string | null },
 ): Promise<void> {
-  const rows = await tx
-    .select({ membershipId: studentGuardian.guardianMembershipId })
-    .from(studentGuardian)
-    .where(
-      and(
-        eq(studentGuardian.tenantId, tenantId),
-        eq(studentGuardian.studentId, studentId),
-        eq(studentGuardian.status, 'ACTIVE'),
-      ),
-    );
-  for (const row of rows) {
-    try {
-      await tx.insert(notification).values({
-        tenantId,
-        recipientMembershipId: row.membershipId,
-        channel,
-        type,
-        studentId,
-        dedupeKey: `${dedupe}:${channel}:${row.membershipId}`,
-        status: 'QUEUED',
-      });
-    } catch (error) {
-      if (!isUniqueViolation(error, 'notification_dedupe')) throw error;
-    }
-  }
+  await queueGuardianNotifications(tx, {
+    tenantId,
+    studentId,
+    type,
+    dedupe,
+    channel,
+    tripId: extra?.tripId,
+    refId: extra?.refId,
+    requireAuthorizeTempAddress: type === 'DELIVERY_OTP',
+  });
 }
 
 function asYmd(value: string | Date): string {
@@ -252,6 +240,7 @@ async function homeDropoff(
         or(isNull(studentAddress.validTo), sql`${studentAddress.validTo} >= ${onDate}`),
       ),
     )
+    .orderBy(desc(studentAddress.validFrom), desc(studentAddress.id))
     .limit(1);
   return row ?? null;
 }
@@ -563,7 +552,12 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
       return withActor(db, tenantId, membershipId, 'GUARDIAN', async (tx) => {
         await assertOtpLive(tx);
         const guardian = await requireGuardian(tx, tenantId, membershipId, input.studentId);
-        if (!guardian.canAuthorizeTempAddress) {
+        if (
+          !canGuardianManageDeliveryOverride({
+            relationActive: true,
+            canAuthorizeTempAddress: guardian.canAuthorizeTempAddress,
+          })
+        ) {
           throw forbidden('Bu veli farklı teslimat yetkisine sahip değil');
         }
         const zone = await tenantZone(tx, tenantId);
@@ -635,14 +629,15 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           `ov:${input.studentId}:${input.serviceDate}`,
         );
         if (otp) {
-          await notifyGuardians(
-            tx,
-            tenantId,
-            input.studentId,
-            'DELIVERY_OTP',
-            `otp:${row.id}:0`,
-            'SMS',
-          );
+        await notifyGuardians(
+          tx,
+          tenantId,
+          input.studentId,
+          'DELIVERY_OTP',
+          `otp:${row.id}:0`,
+          'SMS',
+          { refId: row.id },
+        );
         }
         return overrideToView(row, {
           studentName: guardian.studentName,
@@ -661,7 +656,15 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .from(deliveryOverride)
           .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
         if (!row) throw notFound('Teslim talebi bulunamadı');
-        await requireGuardian(tx, tenantId, membershipId, row.studentId);
+        const guardian = await requireGuardian(tx, tenantId, membershipId, row.studentId);
+        if (
+          !canGuardianManageDeliveryOverride({
+            relationActive: true,
+            canAuthorizeTempAddress: guardian.canAuthorizeTempAddress,
+          })
+        ) {
+          throw forbidden('Bu veli farklı teslimat yetkisine sahip değil');
+        }
         if (!['PENDING_APPROVAL', 'ACTIVE', 'LOCKED'].includes(row.status)) {
           throw conflict('override_inactive', 'Bu talep iptal edilemez');
         }
@@ -691,26 +694,64 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .from(deliveryOverride)
           .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
         if (!row) throw notFound('Teslim talebi bulunamadı');
-        await requireGuardian(tx, tenantId, membershipId, row.studentId);
-        if (row.status !== 'ACTIVE')
-          throw conflict('override_not_active', 'Kod yalnız aktif talepte gönderilir');
+        const guardian = await requireGuardian(tx, tenantId, membershipId, row.studentId);
+        if (
+          !canGuardianManageDeliveryOverride({
+            relationActive: true,
+            canAuthorizeTempAddress: guardian.canAuthorizeTempAddress,
+          })
+        ) {
+          throw forbidden('Bu veli farklı teslimat yetkisine sahip değil');
+        }
+        if (row.status !== 'ACTIVE' && row.status !== 'EXPIRED')
+          throw conflict('override_not_active', 'Kod yalnız aktif veya süresi dolmuş talepte yenilenir');
         const resendCount = Number(row.resendCount);
         const used = Number.isFinite(resendCount) ? resendCount : 0;
         if (!canResendOtp(used))
           throw conflict('otp_resend_limit', 'Yeniden gönderim limiti doldu');
-        const packed = asBuffer(row.otpCiphertext);
-        if (!packed)
-          throw conflict('otp_unavailable', 'Kod artık çözülemez; yönetici onayı gerekir');
+        const zone = await tenantZone(tx, tenantId);
+        const serviceDate = asYmd(row.serviceDate);
+        const expired =
+          row.status === 'EXPIRED' ||
+          Boolean(row.otpExpiresAt && row.otpExpiresAt.getTime() <= Date.now());
         let code: string;
-        try {
-          code = decryptDeliveryOtp(packed, secrets.encryptionKey);
-        } catch {
-          throw new HttpError(500, 'otp_decrypt_failed', 'Teslim kodu çözülemedi');
+        const nextResend = used + 1;
+        if (expired || !asBuffer(row.otpCiphertext)) {
+          const otp = issueOtp(secrets, serviceDate, zone);
+          // protect_otp_columns: non-null → non-null yasak; önce temizle.
+          await tx
+            .update(deliveryOverride)
+            .set({ otpHmac: null, otpCiphertext: null })
+            .where(
+              and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)),
+            );
+          await tx
+            .update(deliveryOverride)
+            .set({
+              otpHmac: otp.hmac,
+              otpCiphertext: otp.ciphertext,
+              otpExpiresAt: otp.expiresAt,
+              resendCount: nextResend,
+              attemptCount: 0,
+              status: 'ACTIVE',
+            })
+            .where(
+              and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)),
+            );
+          code = otp.code;
+        } else {
+          try {
+            code = decryptDeliveryOtp(asBuffer(row.otpCiphertext)!, secrets.encryptionKey);
+          } catch {
+            throw new HttpError(500, 'otp_decrypt_failed', 'Teslim kodu çözülemedi');
+          }
+          await tx
+            .update(deliveryOverride)
+            .set({ resendCount: nextResend })
+            .where(
+              and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)),
+            );
         }
-        await tx
-          .update(deliveryOverride)
-          .set({ resendCount: used + 1 })
-          .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
         const [addr] = await tx
           .select({ text: address.text })
           .from(address)
@@ -720,14 +761,15 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           tenantId,
           row.studentId,
           'DELIVERY_OTP',
-          `otp:${row.id}:${used + 1}`,
+          `otp:${row.id}:${nextResend}`,
           'SMS',
+          { refId: row.id },
         );
         return {
           id: row.id,
           otpCode: code,
           addressText: addr?.text ?? '',
-          resendCount: used + 1,
+          resendCount: nextResend,
         };
       });
     },
@@ -744,7 +786,18 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const today = ymdInTimeZone(new Date(), zone);
         const serviceDate = date ?? today;
         if (serviceDate < today) throw badRequest('past_date', 'Geçmiş gün planı yok');
-        return loadDayPlan(tx, secrets, tenantId, studentId, guardian.studentName, serviceDate);
+        return loadDayPlan(
+          tx,
+          secrets,
+          tenantId,
+          studentId,
+          guardian.studentName,
+          serviceDate,
+          canGuardianViewDeliveryOtp({
+            relationActive: true,
+            canAuthorizeTempAddress: guardian.canAuthorizeTempAddress,
+          }),
+        );
       });
     },
 
@@ -794,7 +847,7 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         if (override.otpExpiresAt && override.otpExpiresAt.getTime() <= Date.now()) {
           await tx
             .update(deliveryOverride)
-            .set({ status: 'EXPIRED' })
+            .set({ status: 'EXPIRED', otpCiphertext: null, otpHmac: null })
             .where(
               and(eq(deliveryOverride.id, override.id), eq(deliveryOverride.tenantId, tenantId)),
             );
@@ -1120,6 +1173,7 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           'DELIVERY_OTP',
           `otp:${row.id}:0`,
           'SMS',
+          { refId: row.id },
         );
         return { ok: true as const };
       });
@@ -1246,7 +1300,18 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           const guardian = await requireGuardian(tx, tenantId, membershipId, studentId);
           map.set(
             studentId,
-            await loadDayPlan(tx, secrets, tenantId, studentId, guardian.studentName, today),
+            await loadDayPlan(
+              tx,
+              secrets,
+              tenantId,
+              studentId,
+              guardian.studentName,
+              today,
+              canGuardianViewDeliveryOtp({
+                relationActive: true,
+                canAuthorizeTempAddress: guardian.canAuthorizeTempAddress,
+              }),
+            ),
           );
         }
         return map;
@@ -1262,6 +1327,7 @@ async function loadDayPlan(
   studentId: string,
   studentName: string,
   today: string,
+  revealOtp: boolean,
 ): Promise<ParentDayPlan> {
   const exceptions = await tx
     .select({ id: rideException.id, segment: rideException.segment })
@@ -1272,6 +1338,18 @@ async function loadDayPlan(
         eq(rideException.studentId, studentId),
         eq(rideException.serviceDate, today),
         isNull(rideException.cancelledAt),
+      ),
+    );
+  await tx
+    .update(deliveryOverride)
+    .set({ status: 'EXPIRED', otpCiphertext: null, otpHmac: null })
+    .where(
+      and(
+        eq(deliveryOverride.tenantId, tenantId),
+        eq(deliveryOverride.studentId, studentId),
+        eq(deliveryOverride.serviceDate, today),
+        eq(deliveryOverride.status, 'ACTIVE'),
+        lte(deliveryOverride.otpExpiresAt, new Date()),
       ),
     );
   const [override] = await tx
@@ -1299,7 +1377,7 @@ async function loadDayPlan(
     )
     .limit(1);
   let otpCode: string | null = null;
-  if (override?.status === 'ACTIVE') {
+  if (revealOtp && override?.status === 'ACTIVE') {
     const packed = asBuffer(override.ciphertext);
     if (packed) {
       try {

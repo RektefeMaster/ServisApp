@@ -232,3 +232,10 @@ export async function createAddressChange(
 ): Promise<AddressChangeView> {
   return addressChangeView.parse(await request('POST', '/v1/parent/address-changes', session, input));
 }
+
+export async function registerPushToken(
+  session: ParentSession,
+  input: { deviceId: string; platform: 'IOS' | 'ANDROID'; pushToken: string },
+): Promise<void> {
+  await request('POST', '/v1/devices/push-token', session, input);
+}

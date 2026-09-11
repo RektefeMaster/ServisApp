@@ -3,6 +3,7 @@ import type {
   GenerateTripsInput,
   ReportIncidentInput,
   StudentCommandInput,
+  UndoStudentCommandInput,
 } from '@servisapp/contracts';
 import {
   address,
@@ -11,6 +12,8 @@ import {
   deliveryOverride,
   event,
   identity,
+  notification,
+  pendingCommandDependency,
   rideException,
   route,
   routeStop,
@@ -38,20 +41,25 @@ import {
 } from '@servisapp/db';
 import {
   applyStudentAction,
+  canGuardianReceiveChild,
   canTransitionTrip,
   tripReadyCrewBlock,
   deliveryTargetForSegment,
+  evaluateStudentUndo,
   expectedStopKind,
   gpsWatchdog,
+  GUARDIAN_STATE_HOLD_MS,
   pickStudentAnchorStop,
   horizonDatesFrom,
   occupiesVehicle,
   plannedDepartureAt,
+  studentStateNotificationType,
   TRIP_STATES,
   ymdInTimeZone,
   zonedDayEnd,
   zonedDayStart,
   type ActorRole,
+  type HandoverPolicy,
   type StudentState,
   type TripState,
 } from '@servisapp/domain';
@@ -76,6 +84,7 @@ import type {
 } from './ports.js';
 import { studentHomePoints } from './student-home.js';
 import { writeHaversineBaseline } from './tracking.js';
+import { queueGuardianNotifications } from './notify-queue.js';
 import { firstRow, isRecord, jsonObject } from './sql-result.js';
 
 export function createTripPort(
@@ -391,7 +400,12 @@ export function createTripPort(
             reason: 'CRITICAL_CHANGE_UNACKED',
           };
         }
-        const receipt = await beginReceipt(tx, tenantId, actor, input);
+        const receipt = await beginReceipt(tx, tenantId, actor, {
+          clientEventId: input.clientEventId,
+          deviceSeq: input.deviceSeq,
+          commandType: input.action,
+          tripStudentId: input.tripStudentId,
+        });
         if (receipt) return receipt;
 
         const locked = await lockStudent(tx, input.tripStudentId);
@@ -449,6 +463,8 @@ export function createTripPort(
           actorRole: actorRoleOf(actor),
           deliveryTarget: locked.deliveryTarget,
           deliveryVerified: locked.deliveryVerified,
+          handoverPolicy: locked.handoverPolicy,
+          receiverMembershipId: input.receiverMembershipId,
         });
         if (!domain.ok) {
           const body: CommandResult = {
@@ -461,6 +477,14 @@ export function createTripPort(
           };
           await finishReceipt(tx, tenantId, input.clientEventId, body);
           return body;
+        }
+        if (input.receiverMembershipId) {
+          await assertReceiverAllowed(
+            tx,
+            tenantId,
+            locked.studentId,
+            input.receiverMembershipId,
+          );
         }
 
         const applied = await applyLockedTransition(tx, {
@@ -520,9 +544,41 @@ export function createTripPort(
           lng: input.lng,
           occurredAtDevice: input.occurredAtDevice,
           sourceCommandId: input.clientEventId,
+          payload: {
+            action: input.action,
+            ...(input.receiverMembershipId
+              ? { receiverMembershipId: input.receiverMembershipId }
+              : {}),
+          },
+        });
+        await queueGuardianNotifications(tx, {
+          tenantId,
+          studentId: locked.studentId,
+          type: studentStateNotificationType(domain.nextState),
+          dedupe: `state:${input.clientEventId}`,
+          tripId,
+          holdUntil: new Date(Date.now() + GUARDIAN_STATE_HOLD_MS),
+          sourceCommandId: input.clientEventId,
         });
         await finishReceipt(tx, tenantId, input.clientEventId, body);
+        await drainPendingUndos(tx, tenantId, tripId, input.clientEventId);
         return body;
+      });
+    },
+
+    undoStudentCommand(tenantId, actor, tripId, input: UndoStudentCommandInput) {
+      return withTrip(db, tenantId, actor.membershipId, actorRoleOf(actor), async (tx) => {
+        await ensureDevice(tx, tenantId, actor);
+        await lockTrip(tx, tenantId, tripId);
+        await loadTripForActor(tx, tenantId, actor, tripId);
+        const receipt = await beginReceipt(tx, tenantId, actor, {
+          clientEventId: input.clientEventId,
+          deviceSeq: input.deviceSeq,
+          commandType: 'UNDO',
+          tripStudentId: input.tripStudentId,
+        });
+        if (receipt) return receipt;
+        return executeUndo(tx, tenantId, actor, tripId, input);
       });
     },
 
@@ -1214,6 +1270,7 @@ async function getDetailTx(
       deliveryVerifiedAt: tripStudent.deliveryVerifiedAt,
       snapshotDropoffText: tripStudent.snapshotDropoffText,
       receiverName: tripStudent.receiverName,
+      handoverPolicy: student.handoverPolicy,
     })
     .from(tripStudent)
     .innerJoin(student, and(eq(student.id, tripStudent.studentId), eq(student.tenantId, tenantId)))
@@ -1236,6 +1293,11 @@ async function getDetailTx(
     tenantId,
     studentRows.map((row) => row.studentId),
   );
+  const receivers = await loadReceivableGuardians(
+    tx,
+    tenantId,
+    studentRows.map((row) => row.studentId),
+  );
   const students: TripStudentView[] = studentRows.map((row) => {
     const guardian = guardians.get(row.studentId);
     return {
@@ -1252,6 +1314,8 @@ async function getDetailTx(
       guardianPhone: guardian?.phone ?? null,
       guardianName: guardian?.name ?? null,
       deliveryVerified: row.deliveryVerifiedAt !== null,
+      handoverPolicy: row.handoverPolicy,
+      receivers: receivers.get(row.studentId) ?? [],
       snapshotDropoffText: row.snapshotDropoffText,
       receiverName: row.receiverName,
     };
@@ -1393,6 +1457,60 @@ async function loadTripSummary(
     .innerJoin(school, and(eq(school.id, route.schoolId), eq(school.tenantId, tenantId)))
     .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)));
   return row ? toSummary(row) : null;
+}
+
+async function loadReceivableGuardians(
+  tx: Database,
+  tenantId: string,
+  studentIds: string[],
+): Promise<Map<string, Array<{ membershipId: string; fullName: string; relation: string }>>> {
+  const map = new Map<string, Array<{ membershipId: string; fullName: string; relation: string }>>();
+  if (studentIds.length === 0) return map;
+  const rows = await tx
+    .select({
+      studentId: studentGuardian.studentId,
+      membershipId: studentGuardian.guardianMembershipId,
+      fullName: identity.fullName,
+      relation: studentGuardian.relation,
+      canReceiveChild: studentGuardian.canReceiveChild,
+      status: studentGuardian.status,
+    })
+    .from(studentGuardian)
+    .innerJoin(
+      tenantMembership,
+      and(
+        eq(tenantMembership.id, studentGuardian.guardianMembershipId),
+        eq(tenantMembership.tenantId, tenantId),
+      ),
+    )
+    .innerJoin(identity, eq(identity.id, tenantMembership.identityId))
+    .where(
+      and(
+        eq(studentGuardian.tenantId, tenantId),
+        inArray(studentGuardian.studentId, studentIds),
+        eq(studentGuardian.status, 'ACTIVE'),
+        eq(studentGuardian.canReceiveChild, true),
+      ),
+    )
+    .orderBy(asc(identity.fullName));
+  for (const row of rows) {
+    if (
+      !canGuardianReceiveChild({
+        relationActive: row.status === 'ACTIVE',
+        canReceiveChild: row.canReceiveChild,
+      })
+    ) {
+      continue;
+    }
+    const list = map.get(row.studentId) ?? [];
+    list.push({
+      membershipId: row.membershipId,
+      fullName: row.fullName,
+      relation: row.relation,
+    });
+    map.set(row.studentId, list);
+  }
+  return map;
 }
 
 async function loadCrewGuardians(
@@ -1719,12 +1837,367 @@ async function ensureDevice(tx: Database, tenantId: string, actor: TripActor): P
   }
 }
 
+async function executeUndo(
+  tx: Database,
+  tenantId: string,
+  actor: TripActor,
+  tripId: string,
+  input: UndoStudentCommandInput,
+): Promise<CommandResult> {
+  const [target] = await tx
+    .select({
+      status: commandReceipt.status,
+      responseJson: commandReceipt.responseJson,
+    })
+    .from(commandReceipt)
+    .where(
+      and(
+        eq(commandReceipt.tenantId, tenantId),
+        eq(commandReceipt.clientEventId, input.targetClientEventId),
+      ),
+    )
+    .for('update');
+  const targetApplied =
+    target?.status === 'APPLIED' ||
+    (isRecord(target?.responseJson) && target.responseJson['status'] === 'APPLIED');
+  if (!target || (target.status === 'PENDING' && !targetApplied)) {
+    return deferUndo(tx, tenantId, actor, tripId, input);
+  }
+  if (!targetApplied) {
+    const body: CommandResult = {
+      replay: false,
+      status: 'REJECTED',
+      tripStudentId: input.tripStudentId,
+      state: '',
+      stateSeq: 0,
+      reason: 'TARGET_NOT_APPLIED',
+    };
+    await finishReceipt(tx, tenantId, input.clientEventId, body);
+    return body;
+  }
+
+  const locked = await lockStudent(tx, input.tripStudentId);
+  if (locked.tripId !== tripId) {
+    const body: CommandResult = {
+      replay: false,
+      status: 'REJECTED',
+      tripStudentId: input.tripStudentId,
+      state: '',
+      stateSeq: 0,
+      reason: 'TRIP_MISMATCH',
+    };
+    await finishReceipt(tx, tenantId, input.clientEventId, body);
+    return body;
+  }
+
+  const last = await loadLastUndoableEvent(tx, tenantId, input.tripStudentId);
+  const decided = evaluateStudentUndo({
+    tripState: locked.tripState,
+    currentState: locked.state,
+    targetClientEventId: input.targetClientEventId,
+    lastEvent: last,
+    nowMs: Date.now(),
+  });
+  if (!decided.ok) {
+    if (decided.reason === 'TARGET_NOT_APPLIED' && !targetApplied) {
+      return deferUndo(tx, tenantId, actor, tripId, input);
+    }
+    const body: CommandResult = {
+      replay: false,
+      status: 'REJECTED',
+      tripStudentId: input.tripStudentId,
+      state: locked.state,
+      stateSeq: locked.stateSeq,
+      reason: decided.reason,
+    };
+    await finishReceipt(tx, tenantId, input.clientEventId, body);
+    return body;
+  }
+
+  const applied = await applyLockedTransition(tx, {
+    tripStudentId: input.tripStudentId,
+    expectedStateSeq: locked.stateSeq,
+    from: locked.state,
+    to: decided.restoreState,
+  });
+  if (!applied.applied) {
+    const body: CommandResult = {
+      replay: false,
+      status: 'CONFLICT',
+      tripStudentId: input.tripStudentId,
+      state: applied.state,
+      stateSeq: applied.stateSeq,
+      reason: 'STUDENT_STATE_CONFLICT',
+    };
+    await finishReceipt(tx, tenantId, input.clientEventId, body);
+    return body;
+  }
+
+  await insertEvent(tx, {
+    tenantId,
+    actor,
+    tripId,
+    vehicleId: locked.vehicleId,
+    subjectType: 'TRIP_STUDENT',
+    subjectId: input.tripStudentId,
+    eventType: 'STUDENT_STATE',
+    prevState: locked.state,
+    newState: decided.restoreState,
+    lat: input.lat,
+    lng: input.lng,
+    occurredAtDevice: input.occurredAtDevice,
+    sourceCommandId: input.clientEventId,
+    isUndoOfEventId: last?.seq,
+    payload: { action: 'UNDO', targetClientEventId: input.targetClientEventId },
+  });
+  await cancelQueuedStateNotifications(
+    tx,
+    tenantId,
+    tripId,
+    locked.studentId,
+    input.targetClientEventId,
+    input.clientEventId,
+  );
+  const body: CommandResult = {
+    replay: false,
+    status: 'APPLIED',
+    tripStudentId: input.tripStudentId,
+    state: applied.state,
+    stateSeq: applied.stateSeq,
+  };
+  await finishReceipt(tx, tenantId, input.clientEventId, body);
+  return body;
+}
+
+async function deferUndo(
+  tx: Database,
+  tenantId: string,
+  actor: TripActor,
+  tripId: string,
+  input: UndoStudentCommandInput,
+): Promise<CommandResult> {
+  try {
+    await tx.insert(pendingCommandDependency).values({
+      tenantId,
+      clientEventId: input.clientEventId,
+      targetClientEventId: input.targetClientEventId,
+      commandType: 'UNDO',
+      payload: {
+        tripId,
+        tripStudentId: input.tripStudentId,
+        membershipId: actor.membershipId,
+        roles: actor.roles,
+        deviceId: actor.deviceId,
+        platform: actor.platform,
+        appVersion: actor.appVersion,
+        lat: input.lat ?? null,
+        lng: input.lng ?? null,
+        occurredAtDevice: input.occurredAtDevice ?? null,
+      },
+      expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+    });
+  } catch (error) {
+    if (!isUniqueViolation(error, 'pending_command_dependency_pk')) throw error;
+  }
+  const body: CommandResult = {
+    replay: false,
+    status: 'PENDING',
+    tripStudentId: input.tripStudentId,
+    state: '',
+    stateSeq: 0,
+    reason: 'TARGET_NOT_APPLIED',
+  };
+  await finishReceipt(tx, tenantId, input.clientEventId, body);
+  return body;
+}
+
+async function drainPendingUndos(
+  tx: Database,
+  tenantId: string,
+  tripId: string,
+  targetClientEventId: string,
+): Promise<void> {
+  const rows = await tx
+    .select({
+      clientEventId: pendingCommandDependency.clientEventId,
+      commandType: pendingCommandDependency.commandType,
+      payload: pendingCommandDependency.payload,
+    })
+    .from(pendingCommandDependency)
+    .where(
+      and(
+        eq(pendingCommandDependency.tenantId, tenantId),
+        eq(pendingCommandDependency.targetClientEventId, targetClientEventId),
+        gt(pendingCommandDependency.expiresAt, new Date()),
+      ),
+    );
+  for (const row of rows) {
+    if (row.commandType !== 'UNDO' || !isRecord(row.payload)) continue;
+    const payload = row.payload;
+    const tripStudentId =
+      typeof payload['tripStudentId'] === 'string' ? payload['tripStudentId'] : null;
+    const membershipId =
+      typeof payload['membershipId'] === 'string' ? payload['membershipId'] : null;
+    const deviceId = typeof payload['deviceId'] === 'string' ? payload['deviceId'] : null;
+    if (!tripStudentId || !membershipId || !deviceId) continue;
+    const roles = Array.isArray(payload['roles'])
+      ? payload['roles'].filter(
+          (role): role is TripActor['roles'][number] =>
+            role === 'ADMIN' || role === 'DRIVER' || role === 'ATTENDANT' || role === 'GUARDIAN',
+        )
+      : (['ATTENDANT'] as TripActor['roles']);
+    const actor: TripActor = {
+      membershipId,
+      roles: roles.length > 0 ? roles : ['ATTENDANT'],
+      deviceId,
+      platform: payload['platform'] === 'IOS' ? 'IOS' : 'ANDROID',
+      appVersion: typeof payload['appVersion'] === 'string' ? payload['appVersion'] : null,
+    };
+    try {
+      await loadTripForActor(tx, tenantId, actor, tripId);
+    } catch {
+      continue;
+    }
+    const [existing] = await tx
+      .select({ status: commandReceipt.status })
+      .from(commandReceipt)
+      .where(
+        and(
+          eq(commandReceipt.tenantId, tenantId),
+          eq(commandReceipt.clientEventId, row.clientEventId),
+        ),
+      );
+    if (
+      existing?.status === 'APPLIED' ||
+      existing?.status === 'REJECTED' ||
+      existing?.status === 'CONFLICT'
+    ) {
+      continue;
+    }
+    await executeUndo(tx, tenantId, actor, tripId, {
+      clientEventId: row.clientEventId,
+      targetClientEventId,
+      tripStudentId,
+      lat: typeof payload['lat'] === 'number' ? payload['lat'] : undefined,
+      lng: typeof payload['lng'] === 'number' ? payload['lng'] : undefined,
+      occurredAtDevice:
+        typeof payload['occurredAtDevice'] === 'string' ? payload['occurredAtDevice'] : undefined,
+    });
+  }
+}
+
+async function loadLastUndoableEvent(
+  tx: Database,
+  tenantId: string,
+  tripStudentId: string,
+): Promise<{
+  eventType: string;
+  prevState: string | null;
+  newState: string | null;
+  sourceCommandId: string | null;
+  isUndo: boolean;
+  occurredAtMs: number;
+  seq: number;
+} | null> {
+  const [row] = await tx
+    .select({
+      seq: event.seq,
+      eventType: event.eventType,
+      prevState: event.prevState,
+      newState: event.newState,
+      sourceCommandId: event.sourceCommandId,
+      isUndoOfEventId: event.isUndoOfEventId,
+      occurredAtServer: event.occurredAtServer,
+    })
+    .from(event)
+    .where(
+      and(
+        eq(event.tenantId, tenantId),
+        eq(event.subjectId, tripStudentId),
+        inArray(event.eventType, ['STUDENT_STATE', 'DELIVERY_OTP_VERIFIED']),
+      ),
+    )
+    .orderBy(desc(event.seq))
+    .limit(1);
+  if (!row) return null;
+  return {
+    seq: row.seq,
+    eventType: row.eventType,
+    prevState: row.prevState,
+    newState: row.newState,
+    sourceCommandId: row.sourceCommandId,
+    isUndo: typeof row.isUndoOfEventId === 'number',
+    occurredAtMs: row.occurredAtServer.getTime(),
+  };
+}
+
+async function cancelQueuedStateNotifications(
+  tx: Database,
+  tenantId: string,
+  tripId: string,
+  studentId: string,
+  targetCommandId: string,
+  undoCommandId: string,
+): Promise<void> {
+  await tx
+    .update(notification)
+    .set({ status: 'CANCELLED' })
+    .where(
+      and(
+        eq(notification.tenantId, tenantId),
+        eq(notification.sourceCommandId, targetCommandId),
+        eq(notification.status, 'QUEUED'),
+      ),
+    );
+  const [sent] = await tx
+    .select({ id: notification.id })
+    .from(notification)
+    .where(
+      and(
+        eq(notification.tenantId, tenantId),
+        eq(notification.sourceCommandId, targetCommandId),
+        eq(notification.status, 'SENT'),
+      ),
+    )
+    .limit(1);
+  if (!sent) return;
+  await queueGuardianNotifications(tx, {
+    tenantId,
+    studentId,
+    tripId,
+    type: 'STUDENT_STATE_CORRECTED',
+    dedupe: `correct:${undoCommandId}`,
+  });
+}
+
 async function beginReceipt(
   tx: Database,
   tenantId: string,
   actor: TripActor,
-  input: StudentCommandInput,
+  input: {
+    clientEventId: string;
+    deviceSeq?: number;
+    commandType: string;
+    tripStudentId: string;
+  },
 ): Promise<CommandResult | null> {
+  if (input.deviceSeq !== undefined) {
+    const deviceId = requireDeviceId(actor);
+    const [dup] = await tx
+      .select({ clientEventId: commandReceipt.clientEventId })
+      .from(commandReceipt)
+      .where(
+        and(
+          eq(commandReceipt.tenantId, tenantId),
+          eq(commandReceipt.deviceId, deviceId),
+          eq(commandReceipt.deviceSeq, input.deviceSeq),
+        ),
+      )
+      .limit(1);
+    if (dup && dup.clientEventId !== input.clientEventId) {
+      throw conflict('device_seq_reuse', 'deviceSeq bu cihazda kullanılmış');
+    }
+  }
   const inserted = await tx
     .insert(commandReceipt)
     .values({
@@ -1732,7 +2205,7 @@ async function beginReceipt(
       clientEventId: input.clientEventId,
       deviceId: requireDeviceId(actor),
       deviceSeq: input.deviceSeq,
-      commandType: input.action,
+      commandType: input.commandType,
       status: 'PENDING',
     })
     .onConflictDoNothing({ target: [commandReceipt.tenantId, commandReceipt.clientEventId] })
@@ -1756,7 +2229,7 @@ async function beginReceipt(
   if (existing?.deviceId && existing.deviceId !== requireDeviceId(actor)) {
     throw conflict('command_id_reuse', 'clientEventId başka bir cihaz için kullanılmış');
   }
-  if (existing?.commandType && existing.commandType !== input.action) {
+  if (existing?.commandType && existing.commandType !== input.commandType) {
     throw conflict('command_id_reuse', 'clientEventId başka bir komut için kullanılmış');
   }
   if (existing?.status === 'PENDING' && !isRecord(existing.responseJson)) {
@@ -1806,6 +2279,7 @@ interface LockedStudent {
   deliveryTarget: 'SCHOOL' | 'HOME' | 'TEMP';
   deliveryVerified: boolean;
   studentId: string;
+  handoverPolicy: HandoverPolicy;
 }
 
 async function lockStudent(tx: Database, tripStudentId: string): Promise<LockedStudent> {
@@ -1820,6 +2294,8 @@ async function lockStudent(tx: Database, tripStudentId: string): Promise<LockedS
   const tripState = result['tripState'];
   const state = result['state'];
   const deliveryTarget = result['deliveryTarget'];
+  const handoverPolicy =
+    result['handoverPolicy'] === 'MAY_LEAVE_ALONE' ? 'MAY_LEAVE_ALONE' : 'GUARDIAN_REQUIRED';
   if (
     typeof tripId !== 'string' ||
     typeof studentId !== 'string' ||
@@ -1843,7 +2319,38 @@ async function lockStudent(tx: Database, tripStudentId: string): Promise<LockedS
     deliveryTarget: deliveryTarget as 'SCHOOL' | 'HOME' | 'TEMP',
     deliveryVerified: result['deliveryVerified'] === true,
     studentId,
+    handoverPolicy,
   };
+}
+
+async function assertReceiverAllowed(
+  tx: Database,
+  tenantId: string,
+  studentId: string,
+  receiverMembershipId: string,
+): Promise<void> {
+  const [row] = await tx
+    .select({
+      status: studentGuardian.status,
+      canReceiveChild: studentGuardian.canReceiveChild,
+    })
+    .from(studentGuardian)
+    .where(
+      and(
+        eq(studentGuardian.tenantId, tenantId),
+        eq(studentGuardian.studentId, studentId),
+        eq(studentGuardian.guardianMembershipId, receiverMembershipId),
+      ),
+    );
+  if (
+    !row ||
+    !canGuardianReceiveChild({
+      relationActive: row.status === 'ACTIVE',
+      canReceiveChild: row.canReceiveChild,
+    })
+  ) {
+    throw conflict('invalid_receiver', 'Teslim alan kişi bu öğrenci için yetkili değil');
+  }
 }
 
 async function applyLockedTransition(
@@ -1902,30 +2409,36 @@ async function insertEvent(
     actorRoleOverride?: ActorRole;
     skipDevice?: boolean;
     payload?: Record<string, unknown>;
+    isUndoOfEventId?: number;
   },
-): Promise<void> {
-  await tx.insert(event).values({
-    tenantId: input.tenantId,
-    actorMembershipId:
-      input.actorRoleOverride === 'SYSTEM' || input.actor.membershipId === ''
-        ? null
-        : input.actor.membershipId,
-    actorRole: input.actorRoleOverride ?? actorRoleOf(input.actor),
-    deviceId: input.skipDevice ? null : input.actor.deviceId,
-    vehicleId: input.vehicleId,
-    tripId: input.tripId,
-    subjectType: input.subjectType,
-    subjectId: input.subjectId,
-    eventType: input.eventType,
-    prevState: input.prevState,
-    newState: input.newState,
-    lat: input.lat,
-    lng: input.lng,
-    occurredAtDevice: input.occurredAtDevice ? new Date(input.occurredAtDevice) : null,
-    sourceCommandId: input.sourceCommandId,
-    appVersion: input.actor.appVersion,
-    payload: input.payload ?? {},
-  });
+): Promise<number | null> {
+  const [row] = await tx
+    .insert(event)
+    .values({
+      tenantId: input.tenantId,
+      actorMembershipId:
+        input.actorRoleOverride === 'SYSTEM' || input.actor.membershipId === ''
+          ? null
+          : input.actor.membershipId,
+      actorRole: input.actorRoleOverride ?? actorRoleOf(input.actor),
+      deviceId: input.skipDevice ? null : input.actor.deviceId,
+      vehicleId: input.vehicleId,
+      tripId: input.tripId,
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      eventType: input.eventType,
+      prevState: input.prevState,
+      newState: input.newState,
+      lat: input.lat,
+      lng: input.lng,
+      occurredAtDevice: input.occurredAtDevice ? new Date(input.occurredAtDevice) : null,
+      sourceCommandId: input.sourceCommandId,
+      isUndoOfEventId: input.isUndoOfEventId,
+      appVersion: input.actor.appVersion,
+      payload: input.payload ?? {},
+    })
+    .returning({ seq: event.seq });
+  return row?.seq ?? null;
 }
 
 function actorRoleOf(actor: TripActor): ActorRole {
@@ -1959,7 +2472,9 @@ function tripDecisionError(
 }
 
 function asCommandStatus(value: unknown): CommandResult['status'] | null {
-  if (value === 'APPLIED' || value === 'CONFLICT' || value === 'REJECTED') return value;
+  if (value === 'APPLIED' || value === 'CONFLICT' || value === 'REJECTED' || value === 'PENDING') {
+    return value;
+  }
   return null;
 }
 

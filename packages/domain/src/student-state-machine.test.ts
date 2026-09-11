@@ -28,6 +28,7 @@ describe('öğrenci durum makinesi — kırmızı çizgiler', () => {
       currentState: 'ON_BOARD',
       deliveryTarget: 'TEMP',
       deliveryVerified: true,
+      handoverPolicy: 'MAY_LEAVE_ALONE',
     });
     expect(result).toEqual({ ok: true, nextState: 'DELIVERED' });
   });
@@ -55,9 +56,44 @@ describe('öğrenci durum makinesi — kırmızı çizgiler', () => {
     ).toEqual({ ok: false, reason: 'ILLEGAL_TRANSITION' });
   });
 
-  it('kayıtlı ev adresine teslim kod istemez', () => {
-    const result = applyStudentAction({ ...base, action: 'DELIVER', currentState: 'ON_BOARD' });
+  it('kayıtlı ev adresine MAY_LEAVE_ALONE tek dokunuş teslim eder', () => {
+    const result = applyStudentAction({
+      ...base,
+      action: 'DELIVER',
+      currentState: 'ON_BOARD',
+      handoverPolicy: 'MAY_LEAVE_ALONE',
+    });
     expect(result).toEqual({ ok: true, nextState: 'DELIVERED' });
+  });
+
+  it('handoverPolicy yoksa fail-closed GUARDIAN_REQUIRED sayılır', () => {
+    expect(
+      applyStudentAction({
+        ...base,
+        action: 'DELIVER',
+        currentState: 'ON_BOARD',
+      }),
+    ).toEqual({ ok: false, reason: 'GUARDIAN_RECEIVER_REQUIRED' });
+  });
+
+  it('GUARDIAN_REQUIRED ev tesliminde alıcı üyeliği ister', () => {
+    expect(
+      applyStudentAction({
+        ...base,
+        action: 'DELIVER',
+        currentState: 'ON_BOARD',
+        handoverPolicy: 'GUARDIAN_REQUIRED',
+      }),
+    ).toEqual({ ok: false, reason: 'GUARDIAN_RECEIVER_REQUIRED' });
+    expect(
+      applyStudentAction({
+        ...base,
+        action: 'DELIVER',
+        currentState: 'ON_BOARD',
+        handoverPolicy: 'GUARDIAN_REQUIRED',
+        receiverMembershipId: '11111111-1111-1111-1111-111111111111',
+      }),
+    ).toEqual({ ok: true, nextState: 'DELIVERED' });
   });
 
   it('geç teslim çözümü de TEMP adreste kodu atlayamaz', () => {

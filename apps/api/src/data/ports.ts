@@ -33,6 +33,7 @@ import type {
   ReportIncidentInput,
   SessionSnapshot,
   StudentCommandInput,
+  UndoStudentCommandInput,
   VehicleBroadcast,
   VerifyDeliveryOtpInput,
   AdminOverrideDeliveryInput,
@@ -179,6 +180,8 @@ export interface TripStudentView {
   guardianPhone: string | null;
   guardianName: string | null;
   deliveryVerified: boolean;
+  handoverPolicy: 'GUARDIAN_REQUIRED' | 'MAY_LEAVE_ALONE';
+  receivers: Array<{ membershipId: string; fullName: string; relation: string }>;
   snapshotDropoffText: string | null;
   receiverName: string | null;
 }
@@ -232,7 +235,7 @@ export interface GenerateHorizonResult {
 
 export interface CommandResult {
   replay: boolean;
-  status: 'APPLIED' | 'CONFLICT' | 'REJECTED';
+  status: 'APPLIED' | 'CONFLICT' | 'REJECTED' | 'PENDING';
   tripStudentId: string;
   state: string;
   stateSeq: number;
@@ -266,6 +269,12 @@ export interface TripPort {
     actor: TripActor,
     tripId: string,
     input: StudentCommandInput,
+  ): Promise<CommandResult>;
+  undoStudentCommand(
+    tenantId: string,
+    actor: TripActor,
+    tripId: string,
+    input: UndoStudentCommandInput,
   ): Promise<CommandResult>;
   reportIncident(
     tenantId: string,
@@ -312,7 +321,7 @@ export interface StudentGuardianView {
   relation: string;
   status: 'ACTIVE' | 'REVOKED';
   inviteStatus: 'PENDING' | 'USED' | 'EXPIRED' | 'REVOKED' | null;
-  smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | null;
+  smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'CANCELLED' | null;
 }
 
 export interface StudentListItem {
@@ -367,7 +376,7 @@ export interface GuardianInviteView {
   identityId: string;
   status: 'PENDING' | 'USED' | 'EXPIRED' | 'REVOKED';
   expiresAt: string;
-  smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | null;
+  smsStatus: 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'CANCELLED' | null;
   inviteUrl: string | null;
   token: string | null;
 }
@@ -401,6 +410,24 @@ export interface AdminPort extends RouteAdminPort {
     input: CreateStaffInput,
   ): Promise<{ identityId: string; membershipId: string }>;
   listStaff(tenantId: string): Promise<StaffListItem[]>;
+  setStaffStatus(
+    tenantId: string,
+    membershipId: string,
+    status: 'ACTIVE' | 'SUSPENDED' | 'REVOKED',
+  ): Promise<StaffListItem>;
+  listStaffDevices(
+    tenantId: string,
+    membershipId: string,
+  ): Promise<
+    Array<{
+      deviceId: string;
+      platform: string;
+      revokedAt: string | null;
+      lastSyncAt: string | null;
+    }>
+  >;
+  revokeDevice(tenantId: string, deviceId: string): Promise<{ ok: true }>;
+  serviceDateToday(tenantId: string): Promise<string>;
   createStudent(tenantId: string, input: CreateStudentInput): Promise<{ id: string }>;
   listStudents(tenantId: string): Promise<StudentListItem[]>;
   getStudent(tenantId: string, studentId: string): Promise<StudentListItem | null>;
@@ -559,11 +586,25 @@ export interface RealtimeProbe {
   viewerCount(tripId: string): number;
 }
 
+export interface DevicesPort {
+  registerPushToken(
+    tenantId: string,
+    membershipId: string,
+    input: {
+      deviceId: string;
+      platform: 'IOS' | 'ANDROID';
+      pushToken: string;
+      appVersion?: string;
+    },
+  ): Promise<{ ok: true }>;
+}
+
 export interface AppData {
   getPlatform(): Promise<PlatformConfig>;
   session: SessionPort;
   admin: AdminPort;
   trips: TripPort;
   parent: ParentPort;
+  devices: DevicesPort;
   realtime: RealtimeProbe;
 }

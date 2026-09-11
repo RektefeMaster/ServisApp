@@ -4,6 +4,7 @@ import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { colors } from '@servisapp/ui';
 import type { ParentSession } from './src/api/client';
 import { clearSession, restoreSession } from './src/auth';
+import { registerParentPush } from './src/push';
 import { AbsentScreen } from './src/screens/AbsentScreen';
 import { ChildScreen } from './src/screens/ChildScreen';
 import { DeliveryScreen } from './src/screens/DeliveryScreen';
@@ -33,6 +34,7 @@ export default function App() {
       if (restored) {
         setSession(restored);
         setRoute({ name: 'home' });
+        void registerParentPush(restored);
       }
       setReady(true);
     })();
@@ -54,6 +56,7 @@ export default function App() {
           onLoggedIn={(next) => {
             setSession(next);
             setRoute({ name: 'home' });
+            void registerParentPush(next);
           }}
         />
         <StatusBar style="light" />

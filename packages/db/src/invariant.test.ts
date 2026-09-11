@@ -868,6 +868,7 @@ describe('sefer CAS fonksiyonu', () => {
     );
     expect(locked[0]?.result.state).toBe('EXPECTED');
     expect(locked[0]?.result.stateSeq).toBe(0);
+    expect(locked[0]?.result).toMatchObject({ handoverPolicy: 'GUARDIAN_REQUIRED' });
 
     const applied = await asApi(
       harness.sql,
@@ -886,6 +887,34 @@ describe('sefer CAS fonksiyonu', () => {
         `,
     );
     expect(applied[0]?.result).toMatchObject({ applied: true, state: 'ON_BOARD', stateSeq: 1 });
+
+    const undone = await asApi(
+      harness.sql,
+      world.tenantA,
+      (tx) =>
+        tx<{ result: { applied: boolean; state: string; stateSeq: number } }[]>`
+          select apply_student_state_transition(
+            ${world.tripStudentId}::uuid,
+            1,
+            'ON_BOARD',
+            'EXPECTED',
+            null,
+            null,
+            null
+          ) as result
+        `,
+    );
+    expect(undone[0]?.result).toMatchObject({ applied: true, state: 'EXPECTED', stateSeq: 2 });
+    const [cleared] = await harness.sql<
+      { boarded_at: Date | null; boarded_lat: number | null; boarded_lng: number | null }[]
+    >`
+      select boarded_at, boarded_lat, boarded_lng
+      from trip_student
+      where id = ${world.tripStudentId}
+    `;
+    expect(cleared?.boarded_at).toBeNull();
+    expect(cleared?.boarded_lat).toBeNull();
+    expect(cleared?.boarded_lng).toBeNull();
 
     const conflicted = await asApi(
       harness.sql,

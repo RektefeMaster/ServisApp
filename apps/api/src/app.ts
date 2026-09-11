@@ -151,7 +151,7 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
   if (data) {
     registerConfigRoutes(app, data);
     registerDevRoutes(app, env, data);
-    registerSessionRoutes(app);
+    registerSessionRoutes(app, data);
     registerAdminRoutes(app, data);
     registerParentRoutes(app, data);
     registerTripAdminRoutes(app, data);

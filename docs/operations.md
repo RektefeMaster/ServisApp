@@ -13,7 +13,16 @@ Kaynak: [SPEC.md](../SPEC.md) §12 ve Faz 9. Kill switch ve restore komutları
 | Mobil  | EAS                   | `x-client` + `x-app-version` zorunlu   |
 
 Worker HTTP almaz. Deploy sonrası `fly scale count worker=1` — sefer saatinde
-kapanmasın.
+kapanmasın. Fly `release_command` migration uygular (`MIGRATION_DATABASE_URL`
+doğrudan Postgres). Worker ayrıca `notify.outbox` ve `trips.lifecycle`
+kuyruklarını işler: veli push (Expo), davet SMS ve teslim OTP SMS (Netgsm);
+süresi dolmuş OTP `EXPIRED`; unutulan ACTIVE seferler grace sonrası
+`AUTO_CLOSED`. Push token yoksa aynı metin SMS yedeği ile gider. `NETGSM_*`
+boşsa SMS `QUEUED` kalır; sahte SENT / FAILED yazılmaz. 24 saatten eski
+kuyruk `FAILED` olur. Durum bildirimleri 75 sn bekler; bu sürede geri alınan
+işlem velinin telefonuna gitmez. Yaklaşma bildirimi `notifyAm` / `notifyPm`
+tercihine uyar. Veli girişi üretimde Supabase telefon OTP'dir
+(`EXPO_PUBLIC_DEV_LOGIN` kapalı).
 
 pg-boss `LISTEN` için `WORKER_DATABASE_URL` session pooler (5432) kullanır;
 transaction pooler (6543) kullanılmaz.

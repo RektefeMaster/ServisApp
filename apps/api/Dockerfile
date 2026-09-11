@@ -30,6 +30,7 @@ RUN addgroup -S app && adduser -S app -G app
 COPY --from=build --chown=app:app /out/node_modules ./node_modules
 COPY --from=build --chown=app:app /out/dist ./dist
 COPY --from=build --chown=app:app /out/package.json ./package.json
+COPY --from=build --chown=app:app /repo/packages/db/migrations ./node_modules/@servisapp/db/migrations
 USER app
 EXPOSE 3000
 CMD ["node", "dist/server.js"]

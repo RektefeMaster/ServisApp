@@ -19,6 +19,7 @@ export {
   STUDENT_ACTIONS,
   applyStudentAction,
   studentActionTargetState,
+  type HandoverPolicy,
   type RejectionReason,
   type StudentAction,
   type StudentTransitionInput,
@@ -90,6 +91,20 @@ export {
   type TripGate,
 } from './crew-focus.js';
 export { namesLikelySame, normalizePersonName } from './person-name.js';
+export { toPhoneE164 } from './phone.js';
+export {
+  GUARDIAN_STATE_HOLD_MS,
+  UNDO_WINDOW_MS,
+  evaluateStudentUndo,
+  guardianNotificationHolds,
+  isUndoableStudentAction,
+  isUndoableStudentTransition,
+  studentStateNotificationType,
+  type UndoLastEvent,
+  type UndoRejectionReason,
+  type UndoableStudentAction,
+} from './student-undo.js';
+
 export {
   STUDENT_PLAN_STATUSES,
   segmentPlanStatus,
@@ -97,6 +112,24 @@ export {
   type StudentPlanStatus,
 } from './plan-status.js';
 export { canReadGuardianChild, type GuardianChildAccessInput } from './guardian-access.js';
+export { isEnrollmentEnded } from './enrollment.js';
+export {
+  canGuardianManageDeliveryOverride,
+  canGuardianReceiveChild,
+  canGuardianViewDeliveryOtp,
+  deliveryNeedsReceiverAttestation,
+  shouldNotifyGuardian,
+  type TripSegment,
+} from './guardian-policy.js';
+export {
+  STOP_ARRIVAL_RADIUS_M,
+  STOP_MISS_ADVANCE_M,
+  STOP_MISS_LEAVE_M,
+  planStopArrivals,
+  type ProgressStop,
+  type StopArrivalKind,
+  type StopArrivalMark,
+} from './stop-progress.js';
 export {
   hasUsableCoordinates,
   tripReadyCrewBlock,

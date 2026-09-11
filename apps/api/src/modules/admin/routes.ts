@@ -20,6 +20,7 @@ import {
   pinAddressInput,
   previewImportInput,
   replaceRouteStopsInput,
+  setStaffStatusInput,
 } from '@servisapp/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -44,8 +45,8 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   return result.data;
 }
 
-function todayIstanbul(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
+async function tenantToday(data: AppData, tenantId: string): Promise<string> {
+  return data.admin.serviceDateToday(tenantId);
 }
 
 function adminActor(request: FastifyRequest) {
@@ -173,6 +174,24 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
     return { items: await data.admin.listStaff(tenantIdOf(request)) };
   });
 
+  app.post('/v1/admin/staff/:membershipId/status', async (request) => {
+    const params = parse(z.object({ membershipId: z.uuid() }), request.params);
+    const input = parse(setStaffStatusInput, request.body);
+    return data.admin.setStaffStatus(tenantIdOf(request), params.membershipId, input.status);
+  });
+
+  app.get('/v1/admin/staff/:membershipId/devices', async (request) => {
+    const params = parse(z.object({ membershipId: z.uuid() }), request.params);
+    return {
+      items: await data.admin.listStaffDevices(tenantIdOf(request), params.membershipId),
+    };
+  });
+
+  app.post('/v1/admin/devices/:deviceId/revoke', async (request) => {
+    const params = parse(z.object({ deviceId: z.uuid() }), request.params);
+    return data.admin.revokeDevice(tenantIdOf(request), params.deviceId);
+  });
+
   app.get('/v1/admin/students/:studentId', async (request) => {
     const params = parse(studentIdParams, request.params);
     const item = await data.admin.getStudent(tenantIdOf(request), params.studentId);
@@ -289,7 +308,8 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
     const membershipId = request.auth?.membership?.membershipId;
     if (!membershipId) throw forbidden();
     const query = parse(listTripsQuery.partial(), request.query);
-    return data.admin.listEvents(tenantIdOf(request), membershipId, query.date ?? todayIstanbul());
+    const date = query.date ?? (await tenantToday(data, tenantIdOf(request)));
+    return data.admin.listEvents(tenantIdOf(request), membershipId, date);
   });
 
   app.get('/v1/admin/priorities', async (request) => {
@@ -299,7 +319,7 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
     return data.admin.listPriorities(
       tenantIdOf(request),
       membershipId,
-      query.date ?? todayIstanbul(),
+      query.date ?? (await tenantToday(data, tenantIdOf(request))),
     );
   });
   app.get('/v1/admin/exceptions', async (request) => {

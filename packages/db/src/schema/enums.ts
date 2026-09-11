@@ -103,6 +103,7 @@ export const notificationStatusEnum = pgEnum('notification_status', [
   'SENT',
   'DELIVERED',
   'FAILED',
+  'CANCELLED',
 ]);
 export const membershipStatusEnum = pgEnum('membership_status', [
   'ACTIVE',

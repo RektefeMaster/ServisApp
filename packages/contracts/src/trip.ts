@@ -78,6 +78,7 @@ export const studentCommandInput = z
     tripStudentId: uuid,
     action: studentAction,
     expectedStateSeq: z.number().int().nonnegative(),
+    receiverMembershipId: uuid.optional(),
     lat: coordinate.shape.lat.optional(),
     lng: coordinate.shape.lng.optional(),
     occurredAtDevice: instant.optional(),
@@ -134,6 +135,16 @@ export const tripStudentView = z.object({
   guardianPhone: phoneE164.nullable(),
   guardianName: z.string().nullable(),
   deliveryVerified: z.boolean(),
+  handoverPolicy: z.enum(['GUARDIAN_REQUIRED', 'MAY_LEAVE_ALONE']),
+  receivers: z
+    .array(
+      z.object({
+        membershipId: uuid,
+        fullName: z.string(),
+        relation: z.string(),
+      }),
+    )
+    .default([]),
   snapshotDropoffText: z.string().nullable(),
   receiverName: z.string().nullable(),
 });
@@ -167,13 +178,36 @@ export type TripDetail = z.infer<typeof tripDetail>;
 
 export const commandResult = z.object({
   replay: z.boolean(),
-  status: z.enum(['APPLIED', 'CONFLICT', 'REJECTED']),
+  status: z.enum(['APPLIED', 'CONFLICT', 'REJECTED', 'PENDING']),
   tripStudentId: uuid,
   state: z.string(),
   stateSeq: z.number().int().nonnegative(),
   reason: z.string().optional(),
 });
 export type CommandResult = z.infer<typeof commandResult>;
+
+export const undoStudentCommandInput = z
+  .object({
+    clientEventId: uuid,
+    targetClientEventId: uuid,
+    tripStudentId: uuid,
+    deviceSeq: z.number().int().nonnegative().optional(),
+    lat: coordinate.shape.lat.optional(),
+    lng: coordinate.shape.lng.optional(),
+    occurredAtDevice: instant.optional(),
+  })
+  .refine((value) => (value.lat === undefined) === (value.lng === undefined), {
+    message: 'lat ve lng birlikte gönderilmeli',
+  });
+export type UndoStudentCommandInput = z.infer<typeof undoStudentCommandInput>;
+
+export const registerPushTokenInput = z.object({
+  deviceId: uuid,
+  platform: devicePlatform,
+  pushToken: z.string().trim().min(8).max(4096),
+  appVersion: z.string().trim().min(1).max(40).optional(),
+});
+export type RegisterPushTokenInput = z.infer<typeof registerPushTokenInput>;
 
 export const assignTripVehicleInput = z.object({
   vehicleId: uuid,

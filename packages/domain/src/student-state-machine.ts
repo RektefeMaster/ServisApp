@@ -23,7 +23,10 @@ export type RejectionReason =
   | 'ROLE_NOT_ALLOWED'
   | 'TRIP_NOT_IN_REQUIRED_STATE'
   | 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE'
+  | 'GUARDIAN_RECEIVER_REQUIRED'
   | 'ALREADY_IN_TARGET_STATE';
+
+export type HandoverPolicy = 'GUARDIAN_REQUIRED' | 'MAY_LEAVE_ALONE';
 
 export interface StudentTransitionInput {
   action: StudentAction;
@@ -33,6 +36,9 @@ export interface StudentTransitionInput {
   deliveryTarget: DeliveryTarget;
   /** Farklı adrese teslimde sunucu tarafı doğrulama yapıldı mı (OTP veya admin override). */
   deliveryVerified: boolean;
+  handoverPolicy?: HandoverPolicy;
+  /** GUARDIAN_REQUIRED ev/temp tesliminde ACTIVE+canReceiveChild alıcı. */
+  receiverMembershipId?: string | null;
 }
 
 export type TransitionResult =
@@ -69,10 +75,8 @@ const RULES: Readonly<Record<StudentAction, Rule>> = {
     actors: CREW,
     tripStates: ['ACTIVE'],
     // Kırmızı çizgi: kayıtlı adrese kod yok, farklı adrese kod ZORUNLU.
-    guard: (input) =>
-      input.deliveryTarget === 'TEMP' && !input.deliveryVerified
-        ? 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE'
-        : null,
+    // GUARDIAN_REQUIRED: kapıda yetkili alıcı üyeliği zorunlu.
+    guard: (input) => deliveryGuard(input),
   },
   MARK_DELIVERY_FAILED: {
     from: ['ON_BOARD', 'DELIVERY_FAILED'],
@@ -87,9 +91,7 @@ const RULES: Readonly<Record<StudentAction, Rule>> = {
     tripStates: ['ACTIVE', 'SUSPENDED'],
     guard: (input) => {
       if (input.deliveryTarget === 'SCHOOL') return 'ILLEGAL_TRANSITION';
-      return input.deliveryTarget === 'TEMP' && !input.deliveryVerified
-        ? 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE'
-        : null;
+      return deliveryGuard(input);
     },
   },
   // Teslim edilemeyen çocuğun akıbetine uygulama karar vermez; yönetici verir.
@@ -98,10 +100,7 @@ const RULES: Readonly<Record<StudentAction, Rule>> = {
     to: 'DELIVERED_LATE',
     actors: ['ADMIN'],
     tripStates: ['ACTIVE', 'SUSPENDED', 'ABORTED'],
-    guard: (input) =>
-      input.deliveryTarget === 'TEMP' && !input.deliveryVerified
-        ? 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE'
-        : null,
+    guard: (input) => deliveryGuard(input),
   },
   RESOLVE_RETURNED_TO_SCHOOL: {
     from: ['DELIVERY_FAILED'],
@@ -152,4 +151,18 @@ export function applyStudentAction(input: StudentTransitionInput): TransitionRes
 
 export function studentActionTargetState(action: StudentAction): StudentState {
   return RULES[action].to;
+}
+
+function deliveryGuard(input: StudentTransitionInput): RejectionReason | null {
+  if (input.deliveryTarget === 'TEMP' && !input.deliveryVerified) {
+    return 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE';
+  }
+  if (input.deliveryTarget === 'SCHOOL') return null;
+  // Fail-closed: policy yoksa GUARDIAN_REQUIRED (onboarding/SQL default ile aynı).
+  const policy = input.handoverPolicy ?? 'GUARDIAN_REQUIRED';
+  if (policy === 'GUARDIAN_REQUIRED') {
+    const receiver = input.receiverMembershipId?.trim() ?? '';
+    if (receiver.length === 0) return 'GUARDIAN_RECEIVER_REQUIRED';
+  }
+  return null;
 }

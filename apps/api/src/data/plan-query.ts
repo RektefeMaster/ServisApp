@@ -1,6 +1,7 @@
 import {
   canReadGuardianChild,
   hasUsableCoordinates,
+  isEnrollmentEnded,
   segmentPlanStatus,
   ymdInTimeZone,
   type StudentPlanStatus,
@@ -120,8 +121,9 @@ export function planForStudent(
   },
   assignments: Assignment[],
   hasPinnedAddress: boolean,
+  asOfYmd: string,
 ): StudentPlanPair {
-  const ended = Boolean(row.enrollmentEnd);
+  const ended = isEnrollmentEnded(row.enrollmentEnd, asOfYmd);
   const morningHit = assignments.find((item) => item.segment === 'MORNING');
   const eveningHit = assignments.find((item) => item.segment === 'AFTERNOON');
   return {
@@ -185,18 +187,28 @@ export async function loadParentChildren(
       ),
     );
 
+  const [tenantRow] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
+  const asOf = ymdInTimeZone(new Date(), tenantRow?.timezone ?? 'Europe/Istanbul');
   const visible = rows.filter((row) =>
     canReadGuardianChild({
       membershipStatus,
       guardianRelationStatus: row.relationStatus,
-      studentEnded: Boolean(row.enrollmentEnd),
+      studentEnded: isEnrollmentEnded(row.enrollmentEnd, asOf),
     }),
   );
   const ids = visible.map((row) => row.studentId);
   const assignments = await loadAssignments(tx, tenantId, ids);
   const pinned = await loadPinnedUsages(tx, tenantId, ids);
   return visible.map((row) => {
-    const plan = planForStudent(row, assignments.get(row.studentId) ?? [], pinned.has(row.studentId));
+    const plan = planForStudent(
+      row,
+      assignments.get(row.studentId) ?? [],
+      pinned.has(row.studentId),
+      asOf,
+    );
     return {
       studentId: row.studentId,
       fullName: row.fullName,

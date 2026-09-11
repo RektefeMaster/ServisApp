@@ -3,6 +3,7 @@ import {
   assignTripCrewInput,
   assignTripVehicleInput,
   createStudentTripMoveInput,
+  undoStudentCommandInput,
 } from './trip.js';
 
 describe('operasyon sözleşmesi', () => {
@@ -31,5 +32,14 @@ describe('operasyon sözleşmesi', () => {
       reason: 'Okul değişimi yok; araç değişti',
     });
     expect(parsed.segment).toBe('MORNING');
+  });
+
+  it('geri alma hedef komut kimliğini ister', () => {
+    const parsed = undoStudentCommandInput.parse({
+      clientEventId: '00000000-0000-4000-8000-000000000005',
+      targetClientEventId: '00000000-0000-4000-8000-000000000006',
+      tripStudentId: '00000000-0000-4000-8000-000000000007',
+    });
+    expect(parsed.targetClientEventId).toBe('00000000-0000-4000-8000-000000000006');
   });
 });

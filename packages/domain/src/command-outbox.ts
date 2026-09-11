@@ -14,6 +14,7 @@ export interface OutboxItem {
   deviceSeq: number;
   occurredAtDevice: string;
   status: OutboxStatus;
+  receiverMembershipId?: string;
   conflictState?: StudentState;
   conflictStateSeq?: number;
   rejectReason?: string;
@@ -21,7 +22,7 @@ export interface OutboxItem {
 
 export interface CommandServerResult {
   replay: boolean;
-  status: 'APPLIED' | 'CONFLICT' | 'REJECTED';
+  status: 'APPLIED' | 'CONFLICT' | 'REJECTED' | 'PENDING';
   tripStudentId: string;
   state: string;
   stateSeq: number;
@@ -64,6 +65,7 @@ export function applyOptimistic(
   action: StudentAction,
   tripState: TripState,
   actorRole: ActorRole,
+  receiverMembershipId?: string | null,
 ): { ok: true; student: CrewStudent } | { ok: false; reason: string } {
   const result = applyStudentAction({
     action,
@@ -72,6 +74,8 @@ export function applyOptimistic(
     actorRole,
     deliveryTarget: student.deliveryTarget,
     deliveryVerified: student.deliveryVerified,
+    handoverPolicy: student.handoverPolicy,
+    receiverMembershipId,
   });
   if (!result.ok) return { ok: false, reason: result.reason };
   return {
@@ -106,6 +110,8 @@ export function applyServerResult(item: OutboxItem, result: CommandServerResult)
         conflictState: asStudentState(result.state),
         conflictStateSeq: result.stateSeq,
       };
+    case 'PENDING':
+      return { ...item, status: 'PENDING' };
     default: {
       const unexpected: never = result.status;
       return exhaustive(unexpected, 'applyServerResult');

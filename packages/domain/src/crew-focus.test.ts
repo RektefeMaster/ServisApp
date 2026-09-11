@@ -123,6 +123,7 @@ describe('personel saha odağı', () => {
           fullName: 'Efe Demir',
           deliveryTarget: 'HOME',
           expectedStopId: 'home-stop',
+          handoverPolicy: 'MAY_LEAVE_ALONE',
         }),
       ],
     };

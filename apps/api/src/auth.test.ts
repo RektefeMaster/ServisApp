@@ -103,6 +103,10 @@ function testData(
         ),
         generateHorizon: vi.fn(() => Promise.resolve({ created: 0, skipped: 0, tripIds: [] })),
         listStaff: vi.fn(() => Promise.resolve([])),
+        setStaffStatus: vi.fn(),
+        listStaffDevices: vi.fn(() => Promise.resolve([])),
+        revokeDevice: vi.fn(() => Promise.resolve({ ok: true as const })),
+        serviceDateToday: vi.fn(() => Promise.resolve('2026-09-11')),
         getStudent: vi.fn(() => Promise.resolve(null)),
         endStudent: vi.fn(),
         revokeGuardian: vi.fn(),
@@ -149,6 +153,9 @@ function testData(
         getParentDayPlan: vi.fn(),
         createAddressChange: vi.fn(),
       },
+      devices: {
+        registerPushToken: vi.fn(() => Promise.resolve({ ok: true as const })),
+      },
       trips: {
         generateHorizon: vi.fn(() => Promise.resolve({ created: 0, skipped: 0, tripIds: [] })),
         listForDate: vi.fn(() => Promise.resolve([])),
@@ -158,6 +165,7 @@ function testData(
         completeTrip: vi.fn(),
         cancelTrip: vi.fn(),
         applyStudentCommand: vi.fn(),
+        undoStudentCommand: vi.fn(),
         reportIncident: vi.fn(),
         ingestLocation: vi.fn(),
         verifyDeliveryOtp: vi.fn(),

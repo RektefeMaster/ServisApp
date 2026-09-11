@@ -1,8 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
+import { toPhoneE164 } from '@servisapp/domain';
 import { ApiError, devParentLogin, fetchSession, type ParentSession } from './api/client';
 import { deleteSecret, getSecret, setSecret } from './secure-storage';
 
 const SESSION_KEY = 'parent.session';
+const DEVICE_KEY = 'parent.deviceId';
 
 function createAuthClient(): ReturnType<typeof createClient> | null {
   const url = process.env['EXPO_PUBLIC_SUPABASE_URL'];
@@ -20,6 +22,22 @@ function createAuthClient(): ReturnType<typeof createClient> | null {
       detectSessionInUrl: false,
     },
   });
+}
+
+export function authClientAvailable(): boolean {
+  return createAuthClient() !== null;
+}
+
+export function devPasswordLoginEnabled(): boolean {
+  return process.env['EXPO_PUBLIC_DEV_LOGIN'] === '1';
+}
+
+export async function loadDeviceId(): Promise<string> {
+  const stored = await getSecret(DEVICE_KEY);
+  if (stored) return stored;
+  const created = crypto.randomUUID();
+  await setSecret(DEVICE_KEY, created);
+  return created;
 }
 
 export async function loadStoredSession(): Promise<ParentSession | null> {
@@ -73,8 +91,47 @@ async function sessionFromToken(token: string, preferredTenantId?: string): Prom
   };
 }
 
+export async function requestPhoneOtp(phone: string): Promise<string> {
+  const e164 = toPhoneE164(phone);
+  if (!e164) {
+    throw new ApiError(400, 'invalid_phone', 'Telefon +90… biçiminde olmalı');
+  }
+  const client = createAuthClient();
+  if (!client) {
+    throw new ApiError(503, 'auth_unconfigured', 'Telefon OTP için Auth tanımlı değil');
+  }
+  const { error } = await client.auth.signInWithOtp({ phone: e164 });
+  if (error) {
+    throw new ApiError(401, 'unauthorized', error.message);
+  }
+  return e164;
+}
+
+export async function verifyPhoneOtp(phone: string, code: string): Promise<ParentSession> {
+  const e164 = toPhoneE164(phone);
+  if (!e164) {
+    throw new ApiError(400, 'invalid_phone', 'Telefon +90… biçiminde olmalı');
+  }
+  const client = createAuthClient();
+  if (!client) {
+    throw new ApiError(503, 'auth_unconfigured', 'Telefon OTP için Auth tanımlı değil');
+  }
+  const { data, error } = await client.auth.verifyOtp({
+    phone: e164,
+    token: code.trim(),
+    type: 'sms',
+  });
+  if (error || !data.session) {
+    throw new ApiError(401, 'unauthorized', error?.message ?? 'Kod doğrulanamadı');
+  }
+  const session = await sessionFromToken(data.session.access_token);
+  await persistSession(session);
+  return session;
+}
+
 export async function loginWithPassword(phone: string, password: string): Promise<ParentSession> {
-  const token = (await devParentLogin(phone, password)).token;
+  const e164 = toPhoneE164(phone) ?? phone.trim();
+  const token = (await devParentLogin(e164, password)).token;
   const session = await sessionFromToken(token);
   await persistSession(session);
   return session;
