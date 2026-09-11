@@ -1,3 +1,5 @@
+import { occupiesVehicle, type StudentState } from './states.js';
+
 /**
  * Kapasite kontrolü koltuk sayısıyla öğrenci sayısını karşılaştırmak DEĞİLDİR.
  *
@@ -6,6 +8,17 @@
  * bindiği için zirve ilk durakta oluşur. Naif bir COUNT(*) hem yasal aktarımı
  * reddeder hem de dolu aracı kabul eder (SPEC §13).
  */
+
+/** Planlı biniş, yokluk ve araçtaki çocuk. Teslim / taşınmış sayılmaz; NO_SHOW sonra binebilir. */
+export function countsTowardCapacity(state: StudentState): boolean {
+  return (
+    state === 'EXPECTED' ||
+    state === 'NO_SHOW' ||
+    state === 'ABSENT_PLANNED' ||
+    occupiesVehicle(state)
+  );
+}
+
 export interface StopOccupancyChange {
   seq: number;
   boarding: number;
@@ -18,6 +31,7 @@ export function peakOccupancy(stops: readonly StopOccupancyChange[]): number {
   for (const stop of [...stops].sort((a, b) => a.seq - b.seq)) {
     // Bir durakta önce inilir, sonra binilir: koltuk boşalmadan dolmaz.
     current -= stop.alighting;
+    if (current < 0) current = 0;
     current += stop.boarding;
     if (current > peak) peak = current;
   }

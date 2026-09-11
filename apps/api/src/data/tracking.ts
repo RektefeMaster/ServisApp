@@ -48,12 +48,10 @@ import {
   type GpsAuthReason,
   type ObservedLeg,
   type RouteBaseline,
-  type StudentState,
-  type TripState,
 } from '@servisapp/domain';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { gone, HttpError, notFound } from '../http-error.js';
-import { MemoryRealtimeTransport } from '../realtime/memory.js';
+import type { MemoryRealtimeTransport } from '../realtime/memory.js';
 import { computeGoogleRouteBaseline } from './google-routes.js';
 import { mapDbError } from './db-error.js';
 import { loadParentChildren } from './plan-query.js';
@@ -85,7 +83,10 @@ export function createTrackingPort(db: Database, realtime: MemoryRealtimeTranspo
     ingest(tenantId, actor, tripId, input) {
       return withTracking(db, tenantId, actor.membershipId, crewRole(actor), async (tx) => {
         const [platform] = await tx
-          .select({ killGps: platformSettings.killGps, killRealtime: platformSettings.killRealtime })
+          .select({
+            killGps: platformSettings.killGps,
+            killRealtime: platformSettings.killRealtime,
+          })
           .from(platformSettings)
           .where(eq(platformSettings.id, true));
         if (platform?.killGps) {
@@ -117,7 +118,8 @@ export function createTrackingPort(db: Database, realtime: MemoryRealtimeTranspo
             lastRoutesCallAt: trip.lastRoutesCallAt,
           })
           .from(trip)
-          .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)));
+          .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)))
+          .for('update');
         if (!row) throw authConflict('WRONG_TRIP');
         if (row.state !== 'ACTIVE') throw authConflict('TRIP_NOT_ACTIVE');
         const assigned =
@@ -134,12 +136,12 @@ export function createTrackingPort(db: Database, realtime: MemoryRealtimeTranspo
               eq(vehicleCurrentLocation.tenantId, tenantId),
               eq(vehicleCurrentLocation.vehicleId, row.vehicleId),
             ),
-          );
+          )
+          .for('update');
 
         let sessionEpoch = row.sessionEpoch;
         let sourceDeviceId = row.sourceDeviceId;
-        const lastHeardMs =
-          current?.receivedAt.getTime() ?? row.startedAt?.getTime() ?? nowMs;
+        const lastHeardMs = current?.receivedAt.getTime() ?? row.startedAt?.getTime() ?? nowMs;
         const silenceMs = nowMs - lastHeardMs;
         const foreignDevice = deviceId !== sourceDeviceId;
         if (foreignDevice) {
@@ -254,7 +256,7 @@ export function createTrackingPort(db: Database, realtime: MemoryRealtimeTranspo
           vehicleLat: input.lat,
           vehicleLng: input.lng,
           heading: input.heading ?? null,
-          recordedAt: recordedAt.toISOString(),
+          recordedAt: recordedAt.toISOString().replace(/Z$/, '+00:00'),
           quality,
         });
         if (!platform?.killRealtime) {
@@ -332,7 +334,9 @@ export function createTrackingPort(db: Database, realtime: MemoryRealtimeTranspo
         const [membership] = await tx
           .select({ status: tenantMembership.status })
           .from(tenantMembership)
-          .where(and(eq(tenantMembership.id, membershipId), eq(tenantMembership.tenantId, tenantId)));
+          .where(
+            and(eq(tenantMembership.id, membershipId), eq(tenantMembership.tenantId, tenantId)),
+          );
         if (!membership) return { children: [] };
         const children = await loadParentChildren(tx, tenantId, membershipId, membership.status);
         const items: ParentHomeChild[] = [];
@@ -487,7 +491,7 @@ async function refreshStudentEtas(
   });
 
   for (const student of students) {
-    if (!studentStillTracked(student.state as StudentState)) continue;
+    if (!studentStillTracked(student.state)) continue;
     if (!student.expectedStopId) continue;
     const etaSeconds = remainingEtaSeconds({
       vehicle: input.vehicle,
@@ -548,9 +552,7 @@ async function blendBaselineLegs(
         eq(routeSegmentStat.timeBucket, bucket.hour),
       ),
     );
-  const byKey = new Map(
-    stats.map((row) => [`${row.fromStopId}:${row.toStopId}`, row] as const),
-  );
+  const byKey = new Map(stats.map((row) => [`${row.fromStopId}:${row.toStopId}`, row] as const));
   const tripStops = await tx
     .select({ id: tripStop.id, sourceStopId: tripStop.sourceStopId })
     .from(tripStop)
@@ -559,8 +561,7 @@ async function blendBaselineLegs(
   return legs.map((leg) => {
     const fromSource = sourceOf.get(leg.fromStopId);
     const toSource = sourceOf.get(leg.toStopId);
-    const stat =
-      fromSource && toSource ? byKey.get(`${fromSource}:${toSource}`) : undefined;
+    const stat = fromSource && toSource ? byKey.get(`${fromSource}:${toSource}`) : undefined;
     return {
       ...leg,
       durationSec: blendSegmentSeconds(
@@ -599,9 +600,7 @@ async function unexpectedDwellMs(
       recordedAt: vehicleLocationPing.recordedAt,
     })
     .from(vehicleLocationPing)
-    .where(
-      and(eq(vehicleLocationPing.tripId, tripId), eq(vehicleLocationPing.tenantId, tenantId)),
-    )
+    .where(and(eq(vehicleLocationPing.tripId, tripId), eq(vehicleLocationPing.tenantId, tenantId)))
     .orderBy(desc(vehicleLocationPing.receivedAt))
     .limit(16);
   const cluster = pings.filter((ping) => haversineMeters(vehicle, ping) < 35);
@@ -776,7 +775,7 @@ async function loadParentTripView(
     .select({ status: tenantMembership.status })
     .from(tenantMembership)
     .where(and(eq(tenantMembership.id, membershipId), eq(tenantMembership.tenantId, tenantId)));
-  if (!membership) return null;
+  if (!membership || membership.status !== 'ACTIVE') return null;
 
   const [tripRow] = await tx
     .select({
@@ -784,6 +783,7 @@ async function loadParentTripView(
       state: trip.state,
       vehicleId: trip.currentVehicleId,
       segment: trip.segment,
+      locationSessionEpoch: trip.locationSessionEpoch,
     })
     .from(trip)
     .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)));
@@ -806,6 +806,7 @@ async function loadParentTripView(
         eq(studentGuardian.studentId, tripStudent.studentId),
         eq(studentGuardian.tenantId, tenantId),
         eq(studentGuardian.guardianMembershipId, membershipId),
+        eq(studentGuardian.status, 'ACTIVE'),
       ),
     )
     .where(and(eq(tripStudent.tripId, tripId), eq(tripStudent.tenantId, tenantId)));
@@ -815,19 +816,19 @@ async function loadParentTripView(
     parentCanTrack({
       membershipStatus: membership.status,
       guardianRelationActive: row.relationStatus === 'ACTIVE',
-      tripState: tripRow.state as TripState,
-      studentState: row.state as StudentState,
+      tripState: tripRow.state,
+      studentState: row.state,
     }),
   );
   if (!trackable) {
     const endedStudent = mine[0];
-    if (tripRow.state !== 'ACTIVE' || mine.some((row) => !studentStillTracked(row.state as StudentState))) {
+    if (tripRow.state !== 'ACTIVE' || mine.some((row) => !studentStillTracked(row.state))) {
       if (!endedStudent) return null;
       return {
         tripId,
         segment: tripRow.segment,
-        tripState: tripRow.state as TripState,
-        studentState: endedStudent.state as StudentState,
+        tripState: tripRow.state,
+        studentState: endedStudent.state,
         studentId: endedStudent.studentId,
         vehicle: null,
         liveAvailable: false,
@@ -849,6 +850,7 @@ async function loadParentTripView(
         eq(vehicleCurrentLocation.tenantId, tenantId),
         eq(vehicleCurrentLocation.vehicleId, tripRow.vehicleId),
         eq(vehicleCurrentLocation.tripId, tripId),
+        eq(vehicleCurrentLocation.sessionEpoch, tripRow.locationSessionEpoch),
       ),
     );
   const ageMs = current ? Date.now() - current.recordedAt.getTime() : null;
@@ -873,7 +875,7 @@ async function loadParentTripView(
           vehicleLat: current.lat,
           vehicleLng: current.lng,
           heading: current.heading,
-          recordedAt: current.recordedAt.toISOString(),
+          recordedAt: current.recordedAt.toISOString().replace(/Z$/, '+00:00'),
           quality: current.quality === 'LOW' ? 'LOW' : 'GOOD',
         })
       : null;
@@ -888,8 +890,8 @@ async function loadParentTripView(
   return {
     tripId,
     segment: tripRow.segment,
-    tripState: tripRow.state as TripState,
-    studentState: trackable.state as StudentState,
+    tripState: tripRow.state,
+    studentState: trackable.state,
     studentId: trackable.studentId,
     vehicle: live ? vehicle : null,
     liveAvailable: live,
@@ -901,11 +903,27 @@ async function loadParentTripView(
   };
 }
 
+/** Rota değişince (TEMP, transfer) event-driven yenileme; guardrail SPEC §8. */
+export async function refreshRoutesIfTripChanged(
+  tx: Database,
+  tenantId: string,
+  tripId: string,
+): Promise<void> {
+  const [row] = await tx
+    .select({
+      state: trip.state,
+    })
+    .from(trip)
+    .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)));
+  if (!row || row.state !== 'ACTIVE') return;
+  await writeHaversineBaseline(tx, tenantId, tripId, { force: true, skipGoogle: true });
+}
+
 export async function writeHaversineBaseline(
   tx: Database,
   tenantId: string,
   tripId: string,
-  options: { force?: boolean } = {},
+  options: { force?: boolean; skipGoogle?: boolean } = {},
 ): Promise<void> {
   const [existing] = await tx
     .select({
@@ -926,18 +944,19 @@ export async function writeHaversineBaseline(
     .where(and(eq(tripStop.tripId, tripId), eq(tripStop.tenantId, tenantId)))
     .orderBy(asc(tripStop.seq));
   if (stops.length < 2) return;
-  const google = await computeGoogleRouteBaseline(stops, existing?.startedAt ?? new Date(), {
-    apiKey: process.env['NODE_ENV'] === 'test' ? '' : process.env['GOOGLE_MAPS_API_KEY'],
-  });
+  const google = options.skipGoogle
+    ? null
+    : await computeGoogleRouteBaseline(stops, existing?.startedAt ?? new Date(), {
+        apiKey: process.env['NODE_ENV'] === 'test' ? '' : process.env['GOOGLE_MAPS_API_KEY'],
+      });
   const baseline = google?.baseline ?? chunkedHaversineBaseline(stops);
-  const addedCalls = google?.httpCalls ?? 1;
   await tx
     .update(trip)
     .set({
       routeBaseline: baseline,
       baselineComputedAt: new Date(),
-      routesCallsCount: (existing?.routesCallsCount ?? 0) + addedCalls,
-      lastRoutesCallAt: new Date(),
+      ...(options.skipGoogle ? {} : { lastRoutesCallAt: new Date() }),
+      ...(google ? { routesCallsCount: (existing?.routesCallsCount ?? 0) + google.httpCalls } : {}),
     })
     .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)));
 }

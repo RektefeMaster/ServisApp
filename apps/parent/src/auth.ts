@@ -1,6 +1,6 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import { ApiError, devParentLogin, fetchSession, type ParentSession } from './api/client';
+import { deleteSecret, getSecret, setSecret } from './secure-storage';
 
 const SESSION_KEY = 'parent.session';
 
@@ -10,7 +10,11 @@ function createAuthClient(): ReturnType<typeof createClient> | null {
   if (!url || !publishableKey) return null;
   return createClient(url, publishableKey, {
     auth: {
-      storage: AsyncStorage,
+      storage: {
+        getItem: (key) => getSecret(key),
+        setItem: (key, value) => setSecret(key, value),
+        removeItem: (key) => deleteSecret(key),
+      },
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: false,
@@ -19,7 +23,7 @@ function createAuthClient(): ReturnType<typeof createClient> | null {
 }
 
 export async function loadStoredSession(): Promise<ParentSession | null> {
-  const raw = await AsyncStorage.getItem(SESSION_KEY);
+  const raw = await getSecret(SESSION_KEY);
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as ParentSession;
@@ -31,11 +35,11 @@ export async function loadStoredSession(): Promise<ParentSession | null> {
 }
 
 export async function persistSession(session: ParentSession): Promise<void> {
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  await setSecret(SESSION_KEY, JSON.stringify(session));
 }
 
 export async function clearSession(): Promise<void> {
-  await AsyncStorage.removeItem(SESSION_KEY);
+  await deleteSecret(SESSION_KEY);
   const client = createAuthClient();
   if (client) await client.auth.signOut();
 }

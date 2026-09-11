@@ -138,6 +138,10 @@ function requireString(body: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function asText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
 function requireItems(body: Record<string, unknown>): Record<string, unknown>[] {
   const items = body['items'];
   if (!Array.isArray(items)) throw new Error(`items yok: ${JSON.stringify(body)}`);
@@ -205,7 +209,7 @@ async function mint(input: {
 }): Promise<string> {
   return new SignJWT({
     role: 'authenticated',
-    ...(input.phone ? { phone: input.phone } : {}),
+    ...(input.phone ? { phone: input.phone, phone_verified: true } : {}),
     ...(input.email ? { email: input.email, email_verified: true } : {}),
     ...input.extra,
   })
@@ -1963,9 +1967,14 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(invite.status).toBe(200);
     const inviteToken = requireString(invite.body, 'token');
-    const activated = await asUser('POST', '/v1/parent/invites/activate', { token, client: 'parent' }, {
-      token: inviteToken,
-    });
+    const activated = await asUser(
+      'POST',
+      '/v1/parent/invites/activate',
+      { token, client: 'parent' },
+      {
+        token: inviteToken,
+      },
+    );
     expect(activated.status).toBe(200);
 
     const after = await asUser('GET', '/v1/session', { token, client: 'parent' });
@@ -2951,7 +2960,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(studentRow(detail.body['students'], world.adaStudentId)['state']).toBe('MOVED_OUT');
     expect(studentRow(detail.body['students'], world.canStudentId)['state']).toBe('EXPECTED');
     expect(studentRow(detail.body['students'], world.canStudentId)['expectedStopLabel']).toBe(
-      'Güneş İlkokulu kapı',
+      'Demir apt. önü',
     );
     const canTripStudentId = requireString(
       studentRow(detail.body['students'], world.canStudentId),
@@ -3268,7 +3277,11 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       action: 'RETURN_HOME',
       expectedStateSeq: 1,
     });
-    expect(returned.body).toMatchObject({ status: 'APPLIED', state: 'RETURNED_HOME' });
+    expect(returned.body).toMatchObject({
+      status: 'REJECTED',
+      reason: 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE',
+      state: 'ON_BOARD',
+    });
 
     const boardedEfe = await command(hasan, tripId, {
       tripStudentId: efeId,
@@ -3318,7 +3331,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     const stuck = await asUser('GET', `/v1/trips/${tripId}`, elif);
     expect(stuck.body['state']).toBe('ACTIVE');
     expect(studentRow(stuck.body['students'], world.studentId)['state']).toBe('DELIVERY_FAILED');
-    expect(studentRow(stuck.body['students'], world.canStudentId)['state']).toBe('RETURNED_HOME');
+    expect(studentRow(stuck.body['students'], world.canStudentId)['state']).toBe('ON_BOARD');
   });
 
   it('binme ve kapanış aynı anda yarışır; araçta çocukla COMPLETED yazılamaz', async () => {
@@ -3597,7 +3610,11 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(roles).not.toContain('GUARDIAN');
     const events = await asUser('GET', '/v1/admin/events', admin);
     expect(events.status).toBe(200);
-    expect(events.body).toMatchObject({ items: [], available: false });
+    expect(events.body['available']).toBe(true);
+    expect(Array.isArray(events.body['items'])).toBe(true);
+    expect(typeof events.body['csv']).toBe('string');
+    expect(String(events.body['csv'])).toMatch(/^seq,occurred_at,event_type/);
+    expect(String(events.body['csv'])).not.toMatch(/Efe Demir|Ayşe Demir|\+90532|otpCode/i);
     const exceptions = await asUser('GET', '/v1/admin/exceptions', admin);
     expect(exceptions.status).toBe(200);
     expect(exceptions.body['available']).toBe(true);
@@ -3666,10 +3683,12 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       limit 1
     `;
     expect(homeArrived?.hit).toBe(true);
-    const [baselineCalls] = await postgres.sql<{ n: number }[]>`
-      select routes_calls_count as n from trip where id = ${tripId}::uuid
+    const [baselineRow] = await postgres.sql<{ n: number; has_baseline: boolean }[]>`
+      select routes_calls_count as n, route_baseline is not null as has_baseline
+      from trip where id = ${tripId}::uuid
     `;
-    expect(Number(baselineCalls?.n ?? 0)).toBeGreaterThanOrEqual(1);
+    expect(baselineRow?.has_baseline).toBe(true);
+    expect(Number(baselineRow?.n ?? 0)).toBe(0);
 
     const jump = await pingLocation(hasan, tripId, {
       lat: 41.08,
@@ -3678,7 +3697,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(jump.status).toBe(200);
     expect(jump.body).toMatchObject({ accepted: false, quality: 'REJECTED' });
-    expect(String(jump.body['reason'] ?? '')).toMatch(/sıçrama|hız/i);
+    expect(asText(jump.body['reason'])).toMatch(/sıçrama|hız/i);
     expect(data.realtime.vehicleBroadcasts(tripId)).toHaveLength(1);
 
     const liveAfterJump = await asUser('GET', `/v1/trips/${tripId}`, hasan);
@@ -3700,8 +3719,13 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
 
     const broadcasts = data.realtime.vehicleBroadcasts(tripId);
     expect(broadcasts).toHaveLength(2);
-    expect(broadcasts.every((item) => Object.keys(item.payload).sort().join() ===
-      ['heading', 'quality', 'recordedAt', 'vehicleLat', 'vehicleLng'].sort().join())).toBe(true);
+    expect(
+      broadcasts.every(
+        (item) =>
+          Object.keys(item.payload).sort().join() ===
+          ['heading', 'quality', 'recordedAt', 'vehicleLat', 'vehicleLng'].sort().join(),
+      ),
+    ).toBe(true);
 
     await postgres.sql`
       update vehicle_current_location
@@ -3762,9 +3786,11 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     );
     expect(tracking.status, JSON.stringify(tracking.body)).toBe(200);
     expect(tracking.body['studentId']).toBe(world.studentId);
-    expect(JSON.stringify(tracking.body)).not.toMatch(/Fenerbahçe|Mühürdar|etaSeconds|etaConfidence|eta_confidence/i);
-    expect(String(tracking.body['etaText'] ?? '')).toMatch(/Yaklaşık|Yaklaşıyor|\d+-\d+ dk/);
-    expect(String(tracking.body['etaText'] ?? '')).not.toMatch(/saniye/i);
+    expect(JSON.stringify(tracking.body)).not.toMatch(
+      /Fenerbahçe|Mühürdar|etaSeconds|etaConfidence|eta_confidence/i,
+    );
+    expect(asText(tracking.body['etaText'])).toMatch(/Yaklaşık|Yaklaşıyor|\d+-\d+ dk/);
+    expect(asText(tracking.body['etaText'])).not.toMatch(/saniye/i);
     const ownStop = tracking.body['ownStop'];
     expect(isRecord(ownStop)).toBe(true);
     expect(data.realtime.viewerCount(tripId)).toBe(1);
@@ -3783,7 +3809,11 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expectError(ghostStudent, 404, 'not_found');
 
     const stranger = await asUser('GET', `/v1/parent/trips/${tripId}/tracking`, {
-      token: await mint({ sub: world.denizAuthId, phone: MAVI.admin.phone, email: MAVI.admin.email }),
+      token: await mint({
+        sub: world.denizAuthId,
+        phone: MAVI.admin.phone,
+        email: MAVI.admin.email,
+      }),
       client: 'parent',
       tenantId: world.mavi.tenantId,
     });
@@ -3974,7 +4004,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(fuzzy.status).toBe(200);
     expect(fuzzy.body).toMatchObject({ accepted: false, quality: 'REJECTED' });
-    expect(String(fuzzy.body['reason'] ?? '')).toMatch(/doğruluğu/i);
+    expect(asText(fuzzy.body['reason'])).toMatch(/doğruluğu/i);
 
     const tooFast = await pingLocation(hasan, tripId, {
       lat: lat2 + 0.00002,
@@ -3984,7 +4014,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(tooFast.status).toBe(200);
     expect(tooFast.body).toMatchObject({ accepted: false, quality: 'REJECTED' });
-    expect(String(tooFast.body['reason'] ?? '')).toMatch(/hız/i);
+    expect(asText(tooFast.body['reason'])).toMatch(/hız/i);
 
     const staleClock = await pingLocation(hasan, tripId, {
       lat: lat2 + 0.00003,
@@ -3994,7 +4024,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(staleClock.status).toBe(200);
     expect(staleClock.body).toMatchObject({ accepted: false, quality: 'REJECTED' });
-    expect(String(staleClock.body['reason'] ?? '')).toMatch(/eski/i);
+    expect(asText(staleClock.body['reason'])).toMatch(/eski/i);
 
     const futureClock = await pingLocation(hasan, tripId, {
       lat: lat2 + 0.00004,
@@ -4042,10 +4072,14 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(drifted.status, JSON.stringify(drifted.body)).toBe(200);
     expect(drifted.body['accepted']).toBe(true);
-    const [refreshed] = await postgres.sql<{ n: number }[]>`
-      select routes_calls_count as n from trip where id = ${tripId}::uuid
+    const [refreshed] = await postgres.sql<{ n: number; age_sec: number }[]>`
+      select
+        routes_calls_count as n,
+        extract(epoch from (now() - last_routes_call_at))::int as age_sec
+      from trip where id = ${tripId}::uuid
     `;
-    expect(Number(refreshed?.n ?? 0)).toBe(2);
+    expect(Number(refreshed?.n ?? 0)).toBe(1);
+    expect(Number(refreshed?.age_sec ?? 99)).toBeLessThan(15);
 
     await postgres.sql`
       update vehicle_current_location
@@ -4061,7 +4095,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(staleView.status, JSON.stringify(staleView.body)).toBe(200);
     expect(staleView.body['liveAvailable']).toBe(false);
     expect(staleView.body['vehicle']).toBeNull();
-    expect(String(staleView.body['staleMessage'] ?? '')).toMatch(/güncellenemiyor/);
+    expect(asText(staleView.body['staleMessage'])).toMatch(/güncellenemiyor/);
 
     const students = (await asUser('GET', `/v1/trips/${tripId}`, hasan)).body['students'];
     if (Array.isArray(students)) {
@@ -4084,10 +4118,15 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
   });
 
   it('veli geliştirme girişi telefonla jeton verir', async () => {
-    const login = await request('POST', '/v1/dev/parent-login', {}, {
-      phone: GUNES.guardian.phone,
-      password: 'e2e-dev-login-parola1',
-    });
+    const login = await request(
+      'POST',
+      '/v1/dev/parent-login',
+      {},
+      {
+        phone: GUNES.guardian.phone,
+        password: 'e2e-dev-login-parola1',
+      },
+    );
     expect(login.status, JSON.stringify(login.body)).toBe(200);
     const token = requireString(login.body, 'token');
     const session = await asUser('GET', '/v1/session', {
@@ -4114,7 +4153,10 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(listed.status).toBe(200);
     return {
       morningId: requireString(tripByRoute(requireItems(listed.body), world.routeId), 'id'),
-      afternoonId: requireString(tripByRoute(requireItems(listed.body), world.afternoonRouteId), 'id'),
+      afternoonId: requireString(
+        tripByRoute(requireItems(listed.body), world.afternoonRouteId),
+        'id',
+      ),
     };
   }
 
@@ -4294,7 +4336,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     const efe = studentRow(listed.body['students'], world.studentId);
     expect(efe['deliveryTarget']).toBe('TEMP');
     expect(efe['receiverName']).toBe('Mehmet Demir');
-    expect(String(efe['snapshotDropoffText'] ?? '')).toMatch(/geçici bırakış/);
+    expect(asText(efe['snapshotDropoffText'])).toMatch(/geçici bırakış/);
     expect(efe['deliveryVerified']).toBe(false);
 
     const adminList = await asUser('GET', '/v1/admin/exceptions', await selinAdmin());
@@ -4418,7 +4460,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(isRecord(override)).toBe(true);
     if (isRecord(override)) {
       expect(override['status']).toBe('ACTIVE');
-      expect(String(override['otpCode'] ?? '')).toMatch(/^\d{6}$/);
+      expect(asText(override['otpCode'])).toMatch(/^\d{6}$/);
     }
   });
 
@@ -4427,8 +4469,8 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     const { afternoonId } = await generateDay(serviceDate);
     const hasan = await hasanCrew();
     const before = await asUser('GET', `/v1/trips/${afternoonId}`, hasan);
-    const snapshot = String(
-      studentRow(before.body['students'], world.studentId)['snapshotDropoffText'] ?? '',
+    const snapshot = asText(
+      studentRow(before.body['students'], world.studentId)['snapshotDropoffText'],
     );
     expect(snapshot.length).toBeGreaterThan(3);
 
@@ -4448,9 +4490,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
 
     const after = await asUser('GET', `/v1/trips/${afternoonId}`, hasan);
-    expect(String(studentRow(after.body['students'], world.studentId)['snapshotDropoffText'] ?? '')).toBe(
-      snapshot,
-    );
+    expect(
+      asText(studentRow(after.body['students'], world.studentId)['snapshotDropoffText']),
+    ).toBe(snapshot);
     const [row] = await postgres.sql<{ text: string }[]>`
       select a.text
       from student_address sa
@@ -4480,10 +4522,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     const { afternoonId } = await generateDay(serviceDate);
     const hasan = await hasanCrew();
     const listed = await asUser('GET', `/v1/trips/${afternoonId}`, hasan);
-    const tripStudentId = requireString(
-      studentRow(listed.body['students'], world.studentId),
-      'id',
-    );
+    const tripStudentId = requireString(studentRow(listed.body['students'], world.studentId), 'id');
     await postgres.sql`update platform_settings set kill_otp = true`;
     try {
       const resend = await asUser(
@@ -4551,7 +4590,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(isRecord(day.body['deliveryOverride'])).toBe(true);
     if (isRecord(day.body['deliveryOverride'])) {
       expect(day.body['deliveryOverride']['status']).toBe('ACTIVE');
-      expect(String(day.body['deliveryOverride']['otpCode'] ?? '')).toMatch(/^\d{6}$/);
+      expect(asText(day.body['deliveryOverride']['otpCode'])).toMatch(/^\d{6}$/);
     }
   });
 
@@ -4566,16 +4605,19 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(created.status, JSON.stringify(created.body)).toBe(200);
     const { morningId, afternoonId } = await generateDay(serviceDate);
     const hasan = await hasanCrew();
-    expect(studentRow((await asUser('GET', `/v1/trips/${morningId}`, hasan)).body['students'], world.studentId)['state']).toBe(
-      'ABSENT_PLANNED',
-    );
+    expect(
+      studentRow(
+        (await asUser('GET', `/v1/trips/${morningId}`, hasan)).body['students'],
+        world.studentId,
+      )['state'],
+    ).toBe('ABSENT_PLANNED');
     const day = await asUser(
       'GET',
       `/v1/parent/students/${world.studentId}/day?date=${serviceDate}`,
       parent,
     );
-    const morningExceptionId = String(day.body['morningExceptionId'] ?? '');
-    const eveningExceptionId = String(day.body['eveningExceptionId'] ?? '');
+    const morningExceptionId = asText(day.body['morningExceptionId']);
+    const eveningExceptionId = asText(day.body['eveningExceptionId']);
     expect(morningExceptionId.length).toBeGreaterThan(8);
     expect(eveningExceptionId.length).toBeGreaterThan(8);
     const cancelled = await asUser(
@@ -4586,9 +4628,12 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
     const after = await asUser('GET', `/v1/trips/${morningId}`, hasan);
     expect(studentRow(after.body['students'], world.studentId)['state']).toBe('EXPECTED');
-    expect(studentRow((await asUser('GET', `/v1/trips/${afternoonId}`, hasan)).body['students'], world.studentId)['state']).toBe(
-      'ABSENT_PLANNED',
-    );
+    expect(
+      studentRow(
+        (await asUser('GET', `/v1/trips/${afternoonId}`, hasan)).body['students'],
+        world.studentId,
+      )['state'],
+    ).toBe('ABSENT_PLANNED');
   });
 
   it('personel ebeveyn istisna uçlarına giremez; kod personel yanıtında yok', async () => {
@@ -4641,7 +4686,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     const after = await asUser('GET', `/v1/trips/${afternoonId}`, hasan);
     const restored = studentRow(after.body['students'], world.studentId);
     expect(restored['deliveryTarget']).toBe('HOME');
-    expect(String(restored['snapshotDropoffText'] ?? '')).not.toMatch(/iptal denemesi/);
+    expect(asText(restored['snapshotDropoffText'])).not.toMatch(/iptal denemesi/);
 
     const boardedDate = exceptionDate(12);
     const second = await asUser('POST', '/v1/parent/delivery-overrides', parent, {
@@ -4673,5 +4718,256 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expectError(denied, 409, 'student_on_board');
     const stillTemp = await asUser('GET', `/v1/trips/${liveAfternoonId}`, hasan);
     expect(studentRow(stillTemp.body['students'], world.studentId)['deliveryTarget']).toBe('TEMP');
+  });
+
+  it('sefer aracı/personel değişir, transfer zirve doluluğa bakar, olay ve öncelik dolar', async () => {
+    const admin = await selinAdmin();
+    const destVehicle = await asUser('POST', '/v1/admin/vehicles', admin, {
+      plate: '34 GNS 08',
+      seatCount: 16,
+    });
+    expect(destVehicle.status).toBe(200);
+    const swapVehicle = await asUser('POST', '/v1/admin/vehicles', admin, {
+      plate: '34 GNS 09',
+      seatCount: 16,
+    });
+    expect(swapVehicle.status).toBe(200);
+    const destVehicleId = requireString(destVehicle.body, 'id');
+    const swapVehicleId = requireString(swapVehicle.body, 'id');
+
+    const noraAddr = await asUser('POST', '/v1/admin/addresses', admin, {
+      text: 'Rasimpaşa Mah. Mahmutbaba Sk. No:7',
+      il: 'İstanbul',
+      ilce: 'Kadıköy',
+      lat: 40.9951,
+      lng: 29.0312,
+    });
+    expect(noraAddr.status).toBe(200);
+    const noraAddressId = requireString(noraAddr.body, 'id');
+    const nora = await asUser('POST', '/v1/admin/students', admin, {
+      fullName: 'Nora Şahin',
+      schoolId: world.schoolId,
+      grade: '3-A',
+      handoverPolicy: 'GUARDIAN_REQUIRED',
+      enrollmentStart: '2026-09-01',
+      pickupAddressId: noraAddressId,
+      dropoffAddressId: noraAddressId,
+    });
+    expect(nora.status).toBe(200);
+    const noraStop = await asUser('POST', '/v1/admin/stops', admin, {
+      addressId: noraAddressId,
+      label: 'Rasimpaşa kapı',
+      lat: 40.9952,
+      lng: 29.0313,
+    });
+    expect(noraStop.status).toBe(200);
+
+    const created = await asUser('POST', '/v1/admin/routes', admin, {
+      vehicleId: destVehicleId,
+      schoolId: world.schoolId,
+      segment: 'MORNING',
+      shiftNo: 1,
+      effectiveFrom: '2026-09-09',
+    });
+    expect(created.status).toBe(200);
+    const destRouteId = requireString(created.body, 'id');
+    const draftId = requireString(created.body, 'draftVersionId');
+    const filled = await asUser('PUT', `/v1/admin/route-versions/${draftId}/stops`, admin, {
+      stops: [
+        {
+          stopId: requireString(noraStop.body, 'id'),
+          kind: 'PICKUP',
+          seq: 1,
+          studentIds: [requireString(nora.body, 'id')],
+        },
+        {
+          stopId: world.schoolStopId,
+          kind: 'SCHOOL',
+          seq: 2,
+          studentIds: [],
+        },
+      ],
+    });
+    expect(filled.status, JSON.stringify(filled.body)).toBe(200);
+    const published = await asUser('POST', `/v1/admin/route-versions/${draftId}/publish`, admin);
+    expect(published.status, JSON.stringify(published.body)).toBe(200);
+
+    const opsDate = exceptionDate(20);
+    const generated = await asUser('POST', '/v1/admin/trips/generate', admin, {
+      fromDate: opsDate,
+      days: 1,
+    });
+    expect(generated.status).toBe(200);
+    const listed = await asUser('GET', `/v1/trips?date=${opsDate}`, admin);
+    expect(listed.status).toBe(200);
+    const sourceId = requireString(tripByRoute(requireItems(listed.body), world.routeId), 'id');
+    const destId = requireString(tripByRoute(requireItems(listed.body), destRouteId), 'id');
+
+    const before = await asUser('GET', `/v1/admin/trips/${sourceId}`, admin);
+    expect(before.status).toBe(200);
+    expect(before.body['seatCount']).toBe(16);
+    expect(before.body['driverName']).toBe(GUNES.driver.fullName);
+    const epoch0 = Number(before.body['locationSessionEpoch']);
+
+    const tooSmall = await asUser('POST', `/v1/admin/trips/${sourceId}/vehicle`, admin, {
+      vehicleId: world.minibusId,
+      reason: 'Minibüs denemesi kapasiteyi aşar',
+    });
+    expectError(tooSmall, 409, 'capacity_exceeded');
+
+    const swapped = await asUser('POST', `/v1/admin/trips/${sourceId}/vehicle`, admin, {
+      vehicleId: swapVehicleId,
+      reason: 'Asıl araç bakıma girdi',
+    });
+    expect(swapped.status, JSON.stringify(swapped.body)).toBe(200);
+    expect(swapped.body['plate']).toBe('34 GNS 09');
+    const afterVehicle = await asUser('GET', `/v1/admin/trips/${sourceId}`, admin);
+    expect(Number(afterVehicle.body['locationSessionEpoch'])).toBe(epoch0 + 1);
+    expect(afterVehicle.body['locationSourceDeviceId']).toBeNull();
+    expect(afterVehicle.body['live']).toBeNull();
+
+    const extraDriver = await asUser('POST', '/v1/admin/staff', admin, {
+      fullName: 'Murat Kaya',
+      phone: '+905321110010',
+      email: 'murat.kaya@gunesis.net',
+      role: 'DRIVER',
+    });
+    expect(extraDriver.status).toBe(200);
+    const extraDriverId = requireString(extraDriver.body, 'membershipId');
+    const muratToken = await mint({
+      sub: randomUUID(),
+      phone: '+905321110010',
+      email: 'murat.kaya@gunesis.net',
+    });
+    const muratSession = await asUser('GET', '/v1/session', { token: muratToken, client: 'crew' });
+    expect(muratSession.status).toBe(200);
+    const crewed = await asUser('POST', `/v1/admin/trips/${sourceId}/crew`, admin, {
+      role: 'DRIVER',
+      membershipId: extraDriverId,
+      reason: 'Hasan izinli; Murat aldı',
+    });
+    expect(crewed.status, JSON.stringify(crewed.body)).toBe(200);
+    const afterCrew = await asUser('GET', `/v1/admin/trips/${sourceId}`, admin);
+    expect(afterCrew.body['driverMembershipId']).toBe(extraDriverId);
+    expect(afterCrew.body['driverName']).toBe('Murat Kaya');
+    expect(Number(afterCrew.body['locationSessionEpoch'])).toBe(epoch0 + 2);
+
+    const moved = await asUser('POST', '/v1/admin/trip-moves', admin, {
+      studentId: world.adaStudentId,
+      serviceDate: opsDate,
+      segment: 'MORNING',
+      targetRouteId: destRouteId,
+      reason: 'Ada ikinci sabah aracına alındı',
+    });
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(moved.body).toMatchObject({
+      studentId: world.adaStudentId,
+      sourceTripId: sourceId,
+      targetTripId: destId,
+      sourceState: 'MOVED_OUT',
+    });
+    const sourceDetail = await asUser('GET', `/v1/trips/${sourceId}`, admin);
+    expect(studentRow(sourceDetail.body['students'], world.adaStudentId)['state']).toBe(
+      'MOVED_OUT',
+    );
+    const destDetail = await asUser('GET', `/v1/trips/${destId}`, admin);
+    expect(studentRow(destDetail.body['students'], world.adaStudentId)['state']).toBe('EXPECTED');
+    const again = await asUser('POST', '/v1/admin/trip-moves', admin, {
+      studentId: world.adaStudentId,
+      serviceDate: opsDate,
+      segment: 'MORNING',
+      targetRouteId: destRouteId,
+      reason: 'Aynı gün ikinci transfer yok',
+    });
+    expectError(again, 409, 'move_exists');
+
+    const hasan = await hasanCrew();
+    const restored = await asUser('POST', `/v1/admin/trips/${sourceId}/crew`, admin, {
+      role: 'DRIVER',
+      membershipId: world.driverMembershipId,
+      reason: 'Hasan sefere geri döndü',
+    });
+    expect(restored.status, JSON.stringify(restored.body)).toBe(200);
+    await startActiveTrip(hasan, sourceId);
+
+    const stealVehicle = await asUser('POST', `/v1/admin/trips/${destId}/vehicle`, admin, {
+      vehicleId: swapVehicleId,
+      reason: 'Canlı seferdeki aracı ikinci sefere vermeyi dene',
+    });
+    expectError(stealVehicle, 409, 'vehicle_in_use');
+    const stealCrew = await asUser('POST', `/v1/admin/trips/${destId}/crew`, admin, {
+      role: 'DRIVER',
+      membershipId: world.driverMembershipId,
+      reason: 'Canlı seferdeki şoförü ikinci sefere vermeyi dene',
+    });
+    expectError(stealCrew, 409, 'crew_in_use');
+
+    const activeDetail = await asUser('GET', `/v1/trips/${sourceId}`, hasan);
+    expect(activeDetail.status).toBe(200);
+    const liveEpoch = Number(activeDetail.body['locationSessionEpoch']);
+    const ping = await pingLocation(hasan, sourceId, {
+      lat: 40.9951,
+      lng: 29.0312,
+      sessionEpoch: liveEpoch,
+    });
+    expect(ping.status, JSON.stringify(ping.body)).toBe(200);
+    expect(ping.body['accepted']).toBe(true);
+    const withLive = await asUser('GET', `/v1/admin/trips/${sourceId}`, admin);
+    expect(isRecord(withLive.body['live'])).toBe(true);
+
+    const liveSwap = await asUser('POST', `/v1/admin/trips/${sourceId}/crew`, admin, {
+      role: 'DRIVER',
+      membershipId: extraDriverId,
+      reason: 'Canlı seferde şoför değişti; eski GPS düşmeli',
+    });
+    expect(liveSwap.status, JSON.stringify(liveSwap.body)).toBe(200);
+    const afterLiveSwap = await asUser('GET', `/v1/admin/trips/${sourceId}`, admin);
+    expect(afterLiveSwap.body['live']).toBeNull();
+    expect(Number(afterLiveSwap.body['locationSessionEpoch'])).toBeGreaterThan(liveEpoch);
+    const staleDriverPing = await pingLocation(hasan, sourceId, {
+      lat: 40.9952,
+      lng: 29.0313,
+      sessionEpoch: liveEpoch,
+    });
+    expectError(staleDriverPing, 409, 'wrong_device');
+
+    const hasanBack = await asUser('POST', `/v1/admin/trips/${sourceId}/crew`, admin, {
+      role: 'DRIVER',
+      membershipId: world.driverMembershipId,
+      reason: 'Hasan canlı sefere geri döndü',
+    });
+    expect(hasanBack.status, JSON.stringify(hasanBack.body)).toBe(200);
+
+    await postgres.sql`
+      update trip
+      set actual_started_at = now() - interval '4 minutes'
+      where id = ${sourceId}::uuid
+    `;
+    const priorities = await asUser('GET', `/v1/admin/priorities?date=${opsDate}`, admin);
+    expect(priorities.status).toBe(200);
+    const priorityItems = requireItems(priorities.body);
+    expect(
+      priorityItems.some((row) => row['kind'] === 'GPS_STALE' && row['tripId'] === sourceId),
+    ).toBe(true);
+
+    const boardedDate = exceptionDate(21);
+    const { morningId } = await generateDay(boardedDate);
+    await startActiveTrip(hasan, morningId);
+    const live = await asUser('GET', `/v1/trips/${morningId}`, hasan);
+    const ada = studentRow(live.body['students'], world.adaStudentId);
+    const boarded = await command(hasan, morningId, {
+      tripStudentId: requireString(ada, 'id'),
+      action: 'BOARD',
+      expectedStateSeq: Number(ada['stateSeq'] ?? 0),
+    });
+    expect(boarded.body['status']).toBe('APPLIED');
+    const denied = await asUser('POST', '/v1/admin/trip-moves', admin, {
+      studentId: world.adaStudentId,
+      serviceDate: boardedDate,
+      segment: 'MORNING',
+      targetRouteId: destRouteId,
+      reason: 'Araçtayken transfer denemesi',
+    });
+    expectError(denied, 409, 'student_on_board');
   });
 });

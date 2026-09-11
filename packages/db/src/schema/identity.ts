@@ -83,7 +83,11 @@ export const identity = pgTable(
         where tm.identity_id = identity.id
           and tm.tenant_id = (select app_tenant_id())
       )`,
-      withCheck: sql`true`,
+      withCheck: sql`exists (
+        select 1 from tenant_membership tm
+        where tm.identity_id = identity.id
+          and tm.tenant_id = (select app_tenant_id())
+      )`,
     }),
   ],
 ).enableRLS();

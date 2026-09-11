@@ -287,6 +287,13 @@ export function TripScreen({
         }
         failFrom(caught, 'Senkron başarısız');
       }
+    } catch (caught) {
+      failFrom(caught, 'Komut kuyruğa alınamadı');
+      try {
+        await reload();
+      } catch (reloadCaught) {
+        failFrom(reloadCaught, 'Sefer yüklenemedi');
+      }
     } finally {
       actionLock.current = false;
     }

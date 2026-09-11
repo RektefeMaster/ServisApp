@@ -32,6 +32,29 @@ describe('öğrenci durum makinesi — kırmızı çizgiler', () => {
     expect(result).toEqual({ ok: true, nextState: 'DELIVERED' });
   });
 
+  it('TEMP iken RETURN_HOME OTP bypass değildir', () => {
+    expect(
+      applyStudentAction({
+        ...base,
+        action: 'RETURN_HOME',
+        currentState: 'ON_BOARD',
+        deliveryTarget: 'TEMP',
+        deliveryVerified: false,
+      }),
+    ).toEqual({ ok: false, reason: 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE' });
+  });
+
+  it('okul hedefinde RETURN_HOME yoktur', () => {
+    expect(
+      applyStudentAction({
+        ...base,
+        action: 'RETURN_HOME',
+        currentState: 'ON_BOARD',
+        deliveryTarget: 'SCHOOL',
+      }),
+    ).toEqual({ ok: false, reason: 'ILLEGAL_TRANSITION' });
+  });
+
   it('kayıtlı ev adresine teslim kod istemez', () => {
     const result = applyStudentAction({ ...base, action: 'DELIVER', currentState: 'ON_BOARD' });
     expect(result).toEqual({ ok: true, nextState: 'DELIVERED' });

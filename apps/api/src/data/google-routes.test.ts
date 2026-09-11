@@ -51,19 +51,22 @@ describe('computeGoogleRouteBaseline', () => {
   });
 
   it('tek parçada sequential departureTime kullanır', async () => {
-    const fetchImpl = vi.fn(async (_url: string, init?: { body?: string }) => ({
-      ok: true,
-      json: async () => ({
-        routes: [
-          {
-            legs: [
-              { duration: '120s', distanceMeters: 800 },
-              { duration: '180s', distanceMeters: 1100 },
+    const fetchImpl = vi.fn((_url: string, _init?: { body?: string }) =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            routes: [
+              {
+                legs: [
+                  { duration: '120s', distanceMeters: 800 },
+                  { duration: '180s', distanceMeters: 1100 },
+                ],
+              },
             ],
-          },
-        ],
+          }),
       }),
-    }));
+    );
     const startedAt = new Date('2026-09-11T04:00:00.000Z');
     const result = await computeGoogleRouteBaseline(points, startedAt, {
       apiKey: 'test-key-xx',
@@ -87,26 +90,27 @@ describe('computeGoogleRouteBaseline', () => {
     }));
     const startedAt = new Date('2026-09-11T04:00:00.000Z');
     const departures: string[] = [];
-    const fetchImpl = vi.fn(async (_url: string, init?: { body?: string }) => {
+    const fetchImpl = vi.fn((_url: string, init?: { body?: string }) => {
       const body = JSON.parse(String(init?.body)) as {
         departureTime: string;
         intermediates?: unknown[];
       };
       departures.push(body.departureTime);
       const legCount = (body.intermediates?.length ?? 0) + 1;
-      return {
+      return Promise.resolve({
         ok: true,
-        json: async () => ({
-          routes: [
-            {
-              legs: Array.from({ length: legCount }, () => ({
-                duration: '10s',
-                distanceMeters: 50,
-              })),
-            },
-          ],
-        }),
-      };
+        json: () =>
+          Promise.resolve({
+            routes: [
+              {
+                legs: Array.from({ length: legCount }, () => ({
+                  duration: '10s',
+                  distanceMeters: 50,
+                })),
+              },
+            ],
+          }),
+      });
     });
     const result = await computeGoogleRouteBaseline(many, startedAt, {
       apiKey: 'test-key-xx',
@@ -122,7 +126,7 @@ describe('computeGoogleRouteBaseline', () => {
   it('HTTP hatasında haversine’e düşmek için null döner', async () => {
     const result = await computeGoogleRouteBaseline(points, new Date(), {
       apiKey: 'test-key-xx',
-      fetchImpl: (async () => ({ ok: false, json: async () => ({}) })) as unknown as typeof fetch,
+      fetchImpl: (() => Promise.resolve({ ok: false, json: () => Promise.resolve({}) })) as unknown as typeof fetch,
     });
     expect(result).toBeNull();
   });

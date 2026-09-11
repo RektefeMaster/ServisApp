@@ -5,6 +5,7 @@ import { buildApp } from './app.js';
 import type { AppData } from './data/ports.js';
 import type { Env } from './env.js';
 import { HttpError } from './http-error.js';
+import { AUTH_FAIL_MAX } from './plugins/auth-fail-limit.js';
 
 const testEnv: Env = {
   NODE_ENV: 'test',
@@ -113,10 +114,13 @@ function testData(
         sendInviteSms: vi.fn(),
         listTripsForDate: vi.fn(() => Promise.resolve([])),
         getTripDetail: vi.fn(() => Promise.resolve(null)),
-        listEventsUnavailable: vi.fn((): { items: []; available: false } => ({
-          items: [],
-          available: false,
-        })),
+        assignTripVehicle: vi.fn(),
+        assignTripCrew: vi.fn(),
+        transferStudent: vi.fn(),
+        listEvents: vi.fn(() =>
+          Promise.resolve({ available: true as const, items: [], csv: 'seq\n' }),
+        ),
+        listPriorities: vi.fn(() => Promise.resolve({ items: [] })),
         listExceptions: vi.fn(() =>
           Promise.resolve({
             available: true as const,
@@ -174,6 +178,7 @@ async function token(sub = authUserId, extra: Record<string, unknown> = {}): Pro
     phone: '+905321234567',
     email: 'ayse@example.com',
     email_verified: true,
+    phone_verified: true,
     ...extra,
   })
     .setProtectedHeader({ alg: 'HS256' })
@@ -345,6 +350,19 @@ describe('kimlik ve kurulum', () => {
       headers: { 'x-client': 'admin', 'x-app-version': '1.4.2' },
     });
     expect(response.statusCode).toBe(401);
+  });
+
+  it('aynı IP’den tekrarlayan geçersiz oturum 429 olur', async () => {
+    const app = appWith();
+    apps.push(app);
+    const headers = { 'x-client': 'admin' as const, 'x-app-version': '1.4.2' };
+    for (let i = 0; i < AUTH_FAIL_MAX; i += 1) {
+      const response = await app.inject({ method: 'GET', url: '/v1/session', headers });
+      expect(response.statusCode).toBe(401);
+    }
+    const locked = await app.inject({ method: 'GET', url: '/v1/session', headers });
+    expect(locked.statusCode).toBe(429);
+    expect(locked.json()).toMatchObject({ error: 'rate_limited' });
   });
 
   it('CORS preflight kimlik istemez', async () => {

@@ -38,12 +38,14 @@ export {
 } from './reconcile.js';
 export {
   checkCapacity,
+  countsTowardCapacity,
   peakOccupancy,
   type CapacityCheck,
   type StopOccupancyChange,
 } from './capacity.js';
 export { compareSemver, isAppVersionSupported, parseSemver } from './app-version.js';
 export { haversineMeters, type LatLng } from './haversine.js';
+export { pickStudentAnchorStop, type StudentAnchorStop } from './student-anchor.js';
 export {
   evaluateRouteCapacity,
   evaluateRoutePlan,

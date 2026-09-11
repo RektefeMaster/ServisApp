@@ -25,7 +25,6 @@ import {
   studentAddress,
   studentGuardian,
   tenant,
-  tenantMembership,
   trip,
   tripCrewAssignment,
   tripStudent,
@@ -35,6 +34,7 @@ import {
 import {
   canResendOtp,
   detourDecision,
+  exhaustive,
   haversineMeters,
   OTP_MAX_ATTEMPTS,
   otpLockedAfterAttempts,
@@ -42,7 +42,6 @@ import {
   reconcileStudent,
   ymdInTimeZone,
   zonedDayEnd,
-  type StudentState,
 } from '@servisapp/domain';
 import { and, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import {
@@ -60,8 +59,10 @@ import {
   findOpenTripStudents,
   insertPlanEvent,
   raiseCriticalAlert,
+  requirePlanApplied,
 } from './plan-reconcile.js';
 import { firstRow } from './sql-result.js';
+import { refreshRoutesIfTripChanged } from './tracking.js';
 
 export interface OtpSecrets {
   pepper: string;
@@ -141,7 +142,10 @@ async function assertCrewOnTrip(
 }
 
 async function tenantZone(tx: Database, tenantId: string): Promise<string> {
-  const [row] = await tx.select({ timezone: tenant.timezone }).from(tenant).where(eq(tenant.id, tenantId));
+  const [row] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
   return row?.timezone ?? 'Europe/Istanbul';
 }
 
@@ -159,7 +163,10 @@ async function requireGuardian(
       status: studentGuardian.status,
     })
     .from(studentGuardian)
-    .innerJoin(student, and(eq(student.id, studentGuardian.studentId), eq(student.tenantId, tenantId)))
+    .innerJoin(
+      student,
+      and(eq(student.id, studentGuardian.studentId), eq(student.tenantId, tenantId)),
+    )
     .where(
       and(
         eq(studentGuardian.tenantId, tenantId),
@@ -232,7 +239,10 @@ async function homeDropoff(
       ilce: address.ilce,
     })
     .from(studentAddress)
-    .innerJoin(address, and(eq(address.id, studentAddress.addressId), eq(address.tenantId, tenantId)))
+    .innerJoin(
+      address,
+      and(eq(address.id, studentAddress.addressId), eq(address.tenantId, tenantId)),
+    )
     .where(
       and(
         eq(studentAddress.tenantId, tenantId),
@@ -246,11 +256,7 @@ async function homeDropoff(
   return row ?? null;
 }
 
-async function routeMaxDetour(
-  tx: Database,
-  tenantId: string,
-  studentId: string,
-): Promise<number> {
+async function routeMaxDetour(tx: Database, tenantId: string, studentId: string): Promise<number> {
   const [fromTrip] = await tx
     .select({ maxDetourM: route.maxDetourM })
     .from(tripStudent)
@@ -266,8 +272,7 @@ async function routeMaxDetour(
     )
     .limit(1);
   if (fromTrip) return fromTrip.maxDetourM;
-  const [fromRoute] = await tx.select({ maxDetourM: route.maxDetourM }).from(route).where(eq(route.tenantId, tenantId)).limit(1);
-  return fromRoute?.maxDetourM ?? 1500;
+  return 1500;
 }
 
 async function applyRideExceptionToTrips(
@@ -281,20 +286,25 @@ async function applyRideExceptionToTrips(
     segment: 'MORNING' | 'AFTERNOON';
   },
 ): Promise<{ kind: string }> {
-  const open = await findOpenTripStudents(tx, input.tenantId, input.studentId, input.serviceDate, input.segment);
+  const open = await findOpenTripStudents(
+    tx,
+    input.tenantId,
+    input.studentId,
+    input.serviceDate,
+    input.segment,
+  );
   let lastKind = 'NONE';
   for (const item of open) {
     const outcome = reconcileStudent(item.studentState, 'RIDE_EXCEPTION');
     lastKind = outcome.kind;
     switch (outcome.kind) {
       case 'APPLY': {
-        await applyTripStudentPlan(tx, {
-          tripStudentId: item.tripStudentId,
-          state: outcome.nextState,
-        });
-        if (input.segment === 'AFTERNOON') {
-          await cancelActiveOverrides(tx, input.tenantId, input.studentId, input.serviceDate);
-        }
+        requirePlanApplied(
+          await applyTripStudentPlan(tx, {
+            tripStudentId: item.tripStudentId,
+            state: outcome.nextState,
+          }),
+        );
         await insertPlanEvent(tx, {
           tenantId: input.tenantId,
           membershipId: input.membershipId,
@@ -325,10 +335,8 @@ async function applyRideExceptionToTrips(
       case 'IGNORE':
       case 'APPLY_TARGET':
         break;
-      default: {
-        const unexpected: never = outcome;
-        void unexpected;
-      }
+      default:
+        return exhaustive(outcome, 'applyRideExceptionToTrips');
     }
   }
   return { kind: lastKind };
@@ -346,17 +354,26 @@ async function applyOverrideToAfternoon(
     dropoff: { lat: number; lng: number; text: string };
   },
 ): Promise<void> {
-  const open = await findOpenTripStudents(tx, input.tenantId, input.studentId, input.serviceDate, 'AFTERNOON');
+  const open = await findOpenTripStudents(
+    tx,
+    input.tenantId,
+    input.studentId,
+    input.serviceDate,
+    'AFTERNOON',
+  );
   for (const item of open) {
     const outcome = reconcileStudent(item.studentState, 'DELIVERY_OVERRIDE');
     switch (outcome.kind) {
       case 'APPLY_TARGET': {
-        await applyTripStudentPlan(tx, {
-          tripStudentId: item.tripStudentId,
-          deliveryTarget: 'TEMP',
-          receiverName: input.receiverName,
-          dropoff: input.dropoff,
-        });
+        requirePlanApplied(
+          await applyTripStudentPlan(tx, {
+            tripStudentId: item.tripStudentId,
+            deliveryTarget: 'TEMP',
+            receiverName: input.receiverName,
+            dropoff: input.dropoff,
+            needsReview: item.studentState === 'NO_SHOW' ? true : undefined,
+          }),
+        );
         await insertPlanEvent(tx, {
           tenantId: input.tenantId,
           membershipId: input.membershipId,
@@ -376,6 +393,7 @@ async function applyOverrideToAfternoon(
             stopId: item.expectedStopId,
             body: `${input.studentName} bugün farklı adrese bırakılacak (${input.receiverName})`,
           });
+          await refreshRoutesIfTripChanged(tx, input.tenantId, item.tripId);
         }
         break;
       }
@@ -387,10 +405,8 @@ async function applyOverrideToAfternoon(
       case 'IGNORE':
       case 'APPLY':
         break;
-      default: {
-        const unexpected: never = outcome;
-        void unexpected;
-      }
+      default:
+        return exhaustive(outcome, 'applyOverrideToAfternoon');
     }
   }
 }
@@ -414,7 +430,13 @@ function overrideToView(
     status: DeliveryOverrideView['status'];
     receiverName: string;
   },
-  extra: { studentName: string; addressText: string; detourM: number; maxDetourM: number; otpCode: string | null },
+  extra: {
+    studentName: string;
+    addressText: string;
+    detourM: number;
+    maxDetourM: number;
+    otpCode: string | null;
+  },
 ): DeliveryOverrideView {
   return {
     id: row.id,
@@ -479,7 +501,13 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             cancelledAt: row.cancelledAt ? row.cancelledAt.toISOString() : null,
           });
         }
-        await notifyGuardians(tx, tenantId, input.studentId, 'RIDE_EXCEPTION', `ex:${input.studentId}:${input.serviceDate}`);
+        await notifyGuardians(
+          tx,
+          tenantId,
+          input.studentId,
+          'RIDE_EXCEPTION',
+          `ex:${input.studentId}:${input.serviceDate}`,
+        );
         return { items: created };
       });
     },
@@ -498,11 +526,22 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .set({ cancelledAt: new Date() })
           .where(and(eq(rideException.id, exceptionId), eq(rideException.tenantId, tenantId)));
         const serviceDate = asYmd(row.serviceDate);
-        const open = await findOpenTripStudents(tx, tenantId, row.studentId, serviceDate, row.segment);
+        const open = await findOpenTripStudents(
+          tx,
+          tenantId,
+          row.studentId,
+          serviceDate,
+          row.segment,
+        );
         for (const item of open) {
           const outcome = reconcileCancelRideException(item.studentState);
           if (outcome.kind !== 'APPLY') continue;
-          await applyTripStudentPlan(tx, { tripStudentId: item.tripStudentId, state: outcome.nextState });
+          requirePlanApplied(
+            await applyTripStudentPlan(tx, {
+              tripStudentId: item.tripStudentId,
+              state: outcome.nextState,
+            }),
+          );
           if (item.tripState === 'ACTIVE') {
             await raiseCriticalAlert(tx, {
               tenantId,
@@ -516,7 +555,11 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
       });
     },
 
-    createDeliveryOverride(tenantId: string, membershipId: string, input: CreateDeliveryOverrideInput) {
+    createDeliveryOverride(
+      tenantId: string,
+      membershipId: string,
+      input: CreateDeliveryOverrideInput,
+    ) {
       return withActor(db, tenantId, membershipId, 'GUARDIAN', async (tx) => {
         await assertOtpLive(tx);
         const guardian = await requireGuardian(tx, tenantId, membershipId, input.studentId);
@@ -525,11 +568,17 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         }
         const zone = await tenantZone(tx, tenantId);
         const today = ymdInTimeZone(new Date(), zone);
-        if (input.serviceDate < today) throw badRequest('past_date', 'Geçmiş gün için farklı teslimat yok');
+        if (input.serviceDate < today)
+          throw badRequest('past_date', 'Geçmiş gün için farklı teslimat yok');
         const baseline = await homeDropoff(tx, tenantId, input.studentId, input.serviceDate);
         const maxDetourM = await routeMaxDetour(tx, tenantId, input.studentId);
         const detourM = baseline
-          ? Math.round(haversineMeters({ lat: baseline.lat, lng: baseline.lng }, { lat: input.lat, lng: input.lng }))
+          ? Math.round(
+              haversineMeters(
+                { lat: baseline.lat, lng: baseline.lng },
+                { lat: input.lat, lng: input.lng },
+              ),
+            )
           : maxDetourM + 1;
         const decision = detourDecision(detourM, maxDetourM);
         const [addr] = await tx
@@ -541,7 +590,6 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             ilce: baseline?.ilce ?? 'Kadıköy',
             lat: input.lat,
             lng: input.lng,
-            verifiedAt: new Date(),
           })
           .returning({ id: address.id });
         if (!addr) throw new HttpError(500, 'insert_failed', 'Adres kaydedilemedi');
@@ -618,7 +666,13 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           throw conflict('override_inactive', 'Bu talep iptal edilemez');
         }
         const serviceDate = asYmd(row.serviceDate);
-        const open = await findOpenTripStudents(tx, tenantId, row.studentId, serviceDate, 'AFTERNOON');
+        const open = await findOpenTripStudents(
+          tx,
+          tenantId,
+          row.studentId,
+          serviceDate,
+          'AFTERNOON',
+        );
         if (open.some((item) => item.studentState === 'ON_BOARD')) {
           throw conflict('student_on_board', 'Çocuk araçta; farklı teslimat iptal edilemez');
         }
@@ -638,13 +692,21 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
         if (!row) throw notFound('Teslim talebi bulunamadı');
         await requireGuardian(tx, tenantId, membershipId, row.studentId);
-        if (row.status !== 'ACTIVE') throw conflict('override_not_active', 'Kod yalnız aktif talepte gönderilir');
+        if (row.status !== 'ACTIVE')
+          throw conflict('override_not_active', 'Kod yalnız aktif talepte gönderilir');
         const resendCount = Number(row.resendCount);
         const used = Number.isFinite(resendCount) ? resendCount : 0;
-        if (!canResendOtp(used)) throw conflict('otp_resend_limit', 'Yeniden gönderim limiti doldu');
+        if (!canResendOtp(used))
+          throw conflict('otp_resend_limit', 'Yeniden gönderim limiti doldu');
         const packed = asBuffer(row.otpCiphertext);
-        if (!packed) throw conflict('otp_unavailable', 'Kod artık çözülemez; yönetici onayı gerekir');
-        const code = decryptDeliveryOtp(packed, secrets.encryptionKey);
+        if (!packed)
+          throw conflict('otp_unavailable', 'Kod artık çözülemez; yönetici onayı gerekir');
+        let code: string;
+        try {
+          code = decryptDeliveryOtp(packed, secrets.encryptionKey);
+        } catch {
+          throw new HttpError(500, 'otp_decrypt_failed', 'Teslim kodu çözülemedi');
+        }
         await tx
           .update(deliveryOverride)
           .set({ resendCount: used + 1 })
@@ -711,7 +773,8 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .from(tripStudent)
           .innerJoin(trip, and(eq(trip.id, tripStudent.tripId), eq(trip.tenantId, tenantId)))
           .where(and(eq(tripStudent.id, input.tripStudentId), eq(tripStudent.tenantId, tenantId)));
-        if (!studentRow || studentRow.tripId !== tripId) throw notFound('Öğrenci sefer kaydı bulunamadı');
+        if (!studentRow || studentRow.tripId !== tripId)
+          throw notFound('Öğrenci sefer kaydı bulunamadı');
         const [override] = await tx
           .select()
           .from(deliveryOverride)
@@ -732,7 +795,9 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           await tx
             .update(deliveryOverride)
             .set({ status: 'EXPIRED' })
-            .where(and(eq(deliveryOverride.id, override.id), eq(deliveryOverride.tenantId, tenantId)));
+            .where(
+              and(eq(deliveryOverride.id, override.id), eq(deliveryOverride.tenantId, tenantId)),
+            );
           return { kind: 'expired' as const };
         }
         const stored = asBuffer(override.otpHmac);
@@ -790,10 +855,8 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
               outcome.locked ? 'otp_locked' : 'otp_mismatch',
               outcome.locked ? 'Beş yanlış; kod kilitlendi' : 'Kod hatalı',
             );
-          default: {
-            const unexpected: never = outcome;
-            return unexpected;
-          }
+          default:
+            return exhaustive(outcome, 'verifyDeliveryOtp');
         }
       });
     },
@@ -815,7 +878,9 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const [alert] = await tx
           .select({ id: criticalChangeAlert.id, tripId: criticalChangeAlert.tripId })
           .from(criticalChangeAlert)
-          .where(and(eq(criticalChangeAlert.id, alertId), eq(criticalChangeAlert.tenantId, tenantId)));
+          .where(
+            and(eq(criticalChangeAlert.id, alertId), eq(criticalChangeAlert.tenantId, tenantId)),
+          );
         if (!alert || alert.tripId !== tripId) throw notFound('Uyarı bulunamadı');
         await tx
           .insert(criticalChangeAck)
@@ -835,7 +900,8 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const guardian = await requireGuardian(tx, tenantId, membershipId, input.studentId);
         const zone = await tenantZone(tx, tenantId);
         const today = ymdInTimeZone(new Date(), zone);
-        if (input.effectiveFromDate < today) throw badRequest('past_date', 'Geçmiş tarihli adres değişikliği yok');
+        if (input.effectiveFromDate < today)
+          throw badRequest('past_date', 'Geçmiş tarihli adres değişikliği yok');
         const baseline = await homeDropoff(tx, tenantId, input.studentId, today);
         const [addr] = await tx
           .insert(address)
@@ -846,7 +912,6 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             ilce: baseline?.ilce ?? 'Kadıköy',
             lat: input.lat,
             lng: input.lng,
-            verifiedAt: new Date(),
           })
           .returning({ id: address.id });
         if (!addr) throw new HttpError(500, 'insert_failed', 'Adres kaydedilemedi');
@@ -893,7 +958,10 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             cancelledAt: rideException.cancelledAt,
           })
           .from(rideException)
-          .innerJoin(student, and(eq(student.id, rideException.studentId), eq(student.tenantId, tenantId)))
+          .innerJoin(
+            student,
+            and(eq(student.id, rideException.studentId), eq(student.tenantId, tenantId)),
+          )
           .where(and(eq(rideException.tenantId, tenantId), gte(rideException.serviceDate, today)))
           .orderBy(desc(rideException.createdAt))
           .limit(200);
@@ -910,9 +978,17 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             lng: address.lng,
           })
           .from(deliveryOverride)
-          .innerJoin(student, and(eq(student.id, deliveryOverride.studentId), eq(student.tenantId, tenantId)))
-          .innerJoin(address, and(eq(address.id, deliveryOverride.addressId), eq(address.tenantId, tenantId)))
-          .where(and(eq(deliveryOverride.tenantId, tenantId), gte(deliveryOverride.serviceDate, today)))
+          .innerJoin(
+            student,
+            and(eq(student.id, deliveryOverride.studentId), eq(student.tenantId, tenantId)),
+          )
+          .innerJoin(
+            address,
+            and(eq(address.id, deliveryOverride.addressId), eq(address.tenantId, tenantId)),
+          )
+          .where(
+            and(eq(deliveryOverride.tenantId, tenantId), gte(deliveryOverride.serviceDate, today)),
+          )
           .orderBy(desc(deliveryOverride.createdAt))
           .limit(200);
         const addressChanges = await tx
@@ -925,12 +1001,26 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             effectiveFromDate: addressChangeRequest.effectiveFromDate,
           })
           .from(addressChangeRequest)
-          .innerJoin(student, and(eq(student.id, addressChangeRequest.studentId), eq(student.tenantId, tenantId)))
+          .innerJoin(
+            student,
+            and(eq(student.id, addressChangeRequest.studentId), eq(student.tenantId, tenantId)),
+          )
           .innerJoin(
             address,
-            and(eq(address.id, addressChangeRequest.proposedAddressId), eq(address.tenantId, tenantId)),
+            and(
+              eq(address.id, addressChangeRequest.proposedAddressId),
+              eq(address.tenantId, tenantId),
+            ),
           )
-          .where(and(eq(addressChangeRequest.tenantId, tenantId), or(eq(addressChangeRequest.status, 'PENDING'), gte(addressChangeRequest.effectiveFromDate, today))))
+          .where(
+            and(
+              eq(addressChangeRequest.tenantId, tenantId),
+              or(
+                eq(addressChangeRequest.status, 'PENDING'),
+                gte(addressChangeRequest.effectiveFromDate, today),
+              ),
+            ),
+          )
           .orderBy(desc(addressChangeRequest.createdAt))
           .limit(200);
         return {
@@ -991,7 +1081,8 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .from(deliveryOverride)
           .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
         if (!row) throw notFound('Teslim talebi bulunamadı');
-        if (row.status !== 'PENDING_APPROVAL') throw conflict('override_not_pending', 'Onay bekleyen talep yok');
+        if (row.status !== 'PENDING_APPROVAL')
+          throw conflict('override_not_pending', 'Onay bekleyen talep yok');
         const [named] = await tx
           .select({ fullName: student.fullName })
           .from(student)
@@ -1022,7 +1113,14 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           receiverName: row.receiverName,
           dropoff: { lat: addr.lat, lng: addr.lng, text: addr.text },
         });
-        await notifyGuardians(tx, tenantId, row.studentId, 'DELIVERY_OTP', `otp:${row.id}:0`, 'SMS');
+        await notifyGuardians(
+          tx,
+          tenantId,
+          row.studentId,
+          'DELIVERY_OTP',
+          `otp:${row.id}:0`,
+          'SMS',
+        );
         return { ok: true as const };
       });
     },
@@ -1030,11 +1128,16 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
     rejectDeliveryOverride(tenantId: string, membershipId: string, overrideId: string) {
       return withActor(db, tenantId, membershipId, 'ADMIN', async (tx) => {
         const [row] = await tx
-          .select({ studentId: deliveryOverride.studentId, serviceDate: deliveryOverride.serviceDate, status: deliveryOverride.status })
+          .select({
+            studentId: deliveryOverride.studentId,
+            serviceDate: deliveryOverride.serviceDate,
+            status: deliveryOverride.status,
+          })
           .from(deliveryOverride)
           .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
         if (!row) throw notFound('Teslim talebi bulunamadı');
-        if (row.status !== 'PENDING_APPROVAL') throw conflict('override_not_pending', 'Reddedilecek bekleyen talep yok');
+        if (row.status !== 'PENDING_APPROVAL')
+          throw conflict('override_not_pending', 'Reddedilecek bekleyen talep yok');
         await tx
           .update(deliveryOverride)
           .set({ status: 'CANCELLED', otpCiphertext: null })
@@ -1062,12 +1165,19 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const [row] = await tx
           .select()
           .from(addressChangeRequest)
-          .where(and(eq(addressChangeRequest.id, requestId), eq(addressChangeRequest.tenantId, tenantId)));
+          .where(
+            and(
+              eq(addressChangeRequest.id, requestId),
+              eq(addressChangeRequest.tenantId, tenantId),
+            ),
+          );
         if (!row) throw notFound('Adres talebi bulunamadı');
         if (row.status !== 'PENDING') throw conflict('request_not_pending', 'Bekleyen talep yok');
         const effective = String(row.effectiveFromDate).slice(0, 10);
         const [year, month, day] = effective.split('-').map(Number);
-        const prev = new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, (day ?? 1) - 1)).toISOString().slice(0, 10);
+        const prev = new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, (day ?? 1) - 1))
+          .toISOString()
+          .slice(0, 10);
         for (const usage of ['PICKUP', 'DROPOFF'] as const) {
           await tx
             .update(studentAddress)
@@ -1091,7 +1201,12 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         await tx
           .update(addressChangeRequest)
           .set({ status: 'APPROVED' })
-          .where(and(eq(addressChangeRequest.id, requestId), eq(addressChangeRequest.tenantId, tenantId)));
+          .where(
+            and(
+              eq(addressChangeRequest.id, requestId),
+              eq(addressChangeRequest.tenantId, tenantId),
+            ),
+          );
         return { ok: true as const };
       });
     },
@@ -1101,13 +1216,23 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const [row] = await tx
           .select({ status: addressChangeRequest.status })
           .from(addressChangeRequest)
-          .where(and(eq(addressChangeRequest.id, requestId), eq(addressChangeRequest.tenantId, tenantId)));
+          .where(
+            and(
+              eq(addressChangeRequest.id, requestId),
+              eq(addressChangeRequest.tenantId, tenantId),
+            ),
+          );
         if (!row) throw notFound('Adres talebi bulunamadı');
         if (row.status !== 'PENDING') throw conflict('request_not_pending', 'Bekleyen talep yok');
         await tx
           .update(addressChangeRequest)
           .set({ status: 'REJECTED' })
-          .where(and(eq(addressChangeRequest.id, requestId), eq(addressChangeRequest.tenantId, tenantId)));
+          .where(
+            and(
+              eq(addressChangeRequest.id, requestId),
+              eq(addressChangeRequest.tenantId, tenantId),
+            ),
+          );
         return { ok: true as const };
       });
     },
@@ -1119,7 +1244,10 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const map = new Map<string, ParentDayPlan>();
         for (const studentId of studentIds) {
           const guardian = await requireGuardian(tx, tenantId, membershipId, studentId);
-          map.set(studentId, await loadDayPlan(tx, secrets, tenantId, studentId, guardian.studentName, today));
+          map.set(
+            studentId,
+            await loadDayPlan(tx, secrets, tenantId, studentId, guardian.studentName, today),
+          );
         }
         return map;
       });
@@ -1157,7 +1285,10 @@ async function loadDayPlan(
       addressText: address.text,
     })
     .from(deliveryOverride)
-    .innerJoin(address, and(eq(address.id, deliveryOverride.addressId), eq(address.tenantId, tenantId)))
+    .innerJoin(
+      address,
+      and(eq(address.id, deliveryOverride.addressId), eq(address.tenantId, tenantId)),
+    )
     .where(
       and(
         eq(deliveryOverride.tenantId, tenantId),
@@ -1174,7 +1305,7 @@ async function loadDayPlan(
       try {
         otpCode = decryptDeliveryOtp(packed, secrets.encryptionKey);
       } catch {
-        otpCode = null;
+        throw new HttpError(500, 'otp_decrypt_failed', 'Teslim kodu çözülemedi');
       }
     }
   }

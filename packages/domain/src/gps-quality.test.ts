@@ -123,6 +123,23 @@ describe('evaluateGpsQuality', () => {
     ).toBe('GOOD');
   });
 
+  it('son kabul edilen kayıttan eski paketi geri yazmaz', () => {
+    const last = { lat: 40.98, lng: 29.03, recordedAtMs: now - 2_000 };
+    expect(
+      evaluateGpsQuality({
+        nowMs: now,
+        sample: {
+          lat: 40.9803,
+          lng: 29.03,
+          accuracyM: 8,
+          speedMps: 4,
+          recordedAtMs: now - 5_000,
+        },
+        lastGood: last,
+      }),
+    ).toEqual({ quality: 'REJECTED', reason: 'STALE_RECORDED_AT' });
+  });
+
   it('ardışık milisaniye jitterını hız diye reddetmez', () => {
     const last = { lat: 40.98, lng: 29.03, recordedAtMs: now - 50 };
     expect(

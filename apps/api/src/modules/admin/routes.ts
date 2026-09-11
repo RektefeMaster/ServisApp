@@ -1,6 +1,9 @@
 import {
   adminOverrideDeliveryInput,
+  assignTripCrewInput,
+  assignTripVehicleInput,
   cloneRouteVersionInput,
+  createStudentTripMoveInput,
   commitImportInput,
   createGuardianInput,
   createHolidayInput,
@@ -39,6 +42,22 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
     throw badRequest('invalid_body', result.error.issues[0]?.message ?? 'Geçersiz istek');
   }
   return result.data;
+}
+
+function todayIstanbul(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
+}
+
+function adminActor(request: FastifyRequest) {
+  const membership = request.auth?.membership;
+  if (!membership) throw forbidden();
+  return {
+    membershipId: membership.membershipId,
+    roles: membership.roles,
+    deviceId: null as string | null,
+    platform: 'ANDROID' as const,
+    appVersion: null as string | null,
+  };
 }
 
 export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
@@ -249,7 +268,40 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
     return detail;
   });
 
-  app.get('/v1/admin/events', () => data.admin.listEventsUnavailable());
+  app.post('/v1/admin/trips/:tripId/vehicle', async (request) => {
+    const params = parse(z.object({ tripId: z.uuid() }), request.params);
+    const input = parse(assignTripVehicleInput, request.body);
+    return data.admin.assignTripVehicle(tenantIdOf(request), adminActor(request), params.tripId, input);
+  });
+
+  app.post('/v1/admin/trips/:tripId/crew', async (request) => {
+    const params = parse(z.object({ tripId: z.uuid() }), request.params);
+    const input = parse(assignTripCrewInput, request.body);
+    return data.admin.assignTripCrew(tenantIdOf(request), adminActor(request), params.tripId, input);
+  });
+
+  app.post('/v1/admin/trip-moves', async (request) => {
+    const input = parse(createStudentTripMoveInput, request.body);
+    return data.admin.transferStudent(tenantIdOf(request), adminActor(request), input);
+  });
+
+  app.get('/v1/admin/events', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    const query = parse(listTripsQuery.partial(), request.query);
+    return data.admin.listEvents(tenantIdOf(request), membershipId, query.date ?? todayIstanbul());
+  });
+
+  app.get('/v1/admin/priorities', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    const query = parse(listTripsQuery.partial(), request.query);
+    return data.admin.listPriorities(
+      tenantIdOf(request),
+      membershipId,
+      query.date ?? todayIstanbul(),
+    );
+  });
   app.get('/v1/admin/exceptions', async (request) => {
     const membershipId = request.auth?.membership?.membershipId;
     if (!membershipId) throw forbidden();

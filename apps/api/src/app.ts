@@ -117,8 +117,7 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
       }
       const identityId = request.auth?.identityId;
       if (identityId) return `id:${identityId}`;
-      const device = request.headers['x-device-id'];
-      if (typeof device === 'string' && device.length > 0) return `d:${device}`;
+      // x-device-id istemci uydurmasıdır; bucket anahtarı olamaz.
       return `ip:${request.ip ?? 'unknown'}`;
     },
   });

@@ -49,19 +49,24 @@ export async function ensureIdentityId(
   return id;
 }
 
+/** Personel ve veli: aynı şirkette isim eşleşmesi yeter; çapraz kiracı yalnız reuseIdentityId. */
 export async function resolveGuardianIdentity(
   tx: Database,
-  input: { phone: string; fullName: string; reuseIdentityId?: string },
+  tenantId: string,
+  input: { phone: string; fullName: string; email?: string | null; reuseIdentityId?: string },
 ): Promise<string> {
   const existing = await findIdentityByPhone(tx, input.phone);
   if (!existing) {
-    return ensureIdentityId(tx, input.phone, null, input.fullName);
+    return ensureIdentityId(tx, input.phone, input.email ?? null, input.fullName);
   }
-  const reuseOk = input.reuseIdentityId === existing.id || namesLikelySame(existing.fullName, input.fullName);
-  if (!reuseOk) {
-    throw conflict('phone_in_use', 'Bu telefon mevcut bir kişide kullanılıyor');
+  const inTenant = await identityBelongsToTenant(tx, tenantId, existing.id);
+  const explicit = input.reuseIdentityId === existing.id;
+  const sameName = namesLikelySame(existing.fullName, input.fullName);
+  // Aynı şirkette isim eşleşmesi yeter. Başka şirketteki kimlik yalnız açık reuse ile bağlanır.
+  if ((inTenant && (explicit || sameName)) || (!inTenant && explicit)) {
+    return existing.id;
   }
-  return existing.id;
+  throw conflict('phone_in_use', 'Bu telefon mevcut bir kişide kullanılıyor');
 }
 
 type StaffOrGuardianRole = 'ADMIN' | 'DRIVER' | 'ATTENDANT' | 'GUARDIAN';

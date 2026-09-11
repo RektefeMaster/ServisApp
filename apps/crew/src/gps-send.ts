@@ -3,6 +3,12 @@ import type * as Location from 'expo-location';
 import type { LocationIngestResult } from '@servisapp/contracts';
 import { ApiError, postLocation, type CrewSession } from './api/client';
 
+const GPS_STOP_CODES = new Set([
+  'trip_not_active',
+  'gps_killed',
+  'device_revoked',
+  'wrong_device',
+]);
 export const PING_INTERVAL_MS = 8_000;
 const LAST_SENT_KEY = 'crew.gps.lastSentAt';
 const CONTEXT_KEY = 'crew.gps.context';
@@ -74,7 +80,9 @@ export async function sendGpsSample(
     }
     return result;
   } catch (caught) {
-    if (caught instanceof ApiError && caught.status === 409) return 'stopped';
+    if (caught instanceof ApiError && caught.status === 409 && GPS_STOP_CODES.has(caught.code)) {
+      return 'stopped';
+    }
     throw caught;
   }
 }

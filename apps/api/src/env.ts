@@ -52,8 +52,8 @@ const schema = z.object({
    * Fastify CVE-2026-16732 hop-count XFF sahteciliğine izin verir.
    */
   TRUST_PROXY: z.preprocess((value) => {
-    if (value === '' || value === undefined) return undefined;
-    const trimmed = String(value).trim();
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
     if (
       trimmed.length === 0 ||
       trimmed === 'true' ||

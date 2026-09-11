@@ -15,7 +15,6 @@ import {
   route,
   routeStop,
   routeStopStudent,
-  routeVersion,
   school,
   schoolCalendarDay,
   staffAssignment,
@@ -44,6 +43,7 @@ import {
   deliveryTargetForSegment,
   expectedStopKind,
   gpsWatchdog,
+  pickStudentAnchorStop,
   horizonDatesFrom,
   occupiesVehicle,
   plannedDepartureAt,
@@ -58,8 +58,12 @@ import {
 import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http-error.js';
 import { isUniqueViolation, mapDbError } from './db-error.js';
-import { loadHorizonRouteVersions, pickApplicableRouteVersions } from './applicable-route-versions.js';
-import { cancelActiveOverrides, listBlockingAlerts, listPendingAlerts } from './plan-reconcile.js';
+import {
+  loadHorizonRouteVersions,
+  pickApplicableRouteVersions,
+} from './applicable-route-versions.js';
+import { listBlockingAlerts, listPendingAlerts } from './plan-reconcile.js';
+import { assertTripResourcesIdle } from './operations.js';
 import type {
   CommandResult,
   GenerateHorizonResult,
@@ -70,6 +74,7 @@ import type {
   TripStudentView,
   TripSummary,
 } from './ports.js';
+import { studentHomePoints } from './student-home.js';
 import { writeHaversineBaseline } from './tracking.js';
 import { firstRow, isRecord, jsonObject } from './sql-result.js';
 
@@ -162,6 +167,13 @@ export function createTripPort(
         }
         if (input.phase === 'BEFORE' && row.state === 'PLANNED') {
           await assertTripReadyCrew(tx, tenantId, row);
+          await assertTripResourcesIdle(tx, {
+            tenantId,
+            tripId,
+            serviceDate: dateOnly(row.serviceDate),
+            vehicleId: row.vehicleId,
+            membershipIds: [row.driverId, row.attendantId],
+          });
           await updateTripWhereState(tx, tenantId, tripId, 'PLANNED', { state: 'READY' });
           await insertEvent(tx, {
             tenantId,
@@ -218,6 +230,13 @@ export function createTripPort(
         }
         if (row.state === 'PLANNED') {
           await assertTripReadyCrew(tx, tenantId, row);
+          await assertTripResourcesIdle(tx, {
+            tenantId,
+            tripId,
+            serviceDate: dateOnly(row.serviceDate),
+            vehicleId: row.vehicleId,
+            membershipIds: [row.driverId, row.attendantId],
+          });
           await updateTripWhereState(tx, tenantId, tripId, 'PLANNED', { state: 'READY' });
           await insertEvent(tx, {
             tenantId,
@@ -233,6 +252,13 @@ export function createTripPort(
           row.state = 'READY';
         }
         await assertTripReadyCrew(tx, tenantId, row);
+        await assertTripResourcesIdle(tx, {
+          tenantId,
+          tripId,
+          serviceDate: dateOnly(row.serviceDate),
+          vehicleId: row.vehicleId,
+          membershipIds: [row.driverId, row.attendantId],
+        });
         const decision = canTransitionTrip({
           from: row.state as TripState,
           to: 'ACTIVE',
@@ -347,8 +373,14 @@ export function createTripPort(
       return withTrip(db, tenantId, actor.membershipId, actorRoleOf(actor), async (tx) => {
         await ensureDevice(tx, tenantId, actor);
         await lockTrip(tx, tenantId, tripId);
-        const tripRow = await loadTripForActor(tx, tenantId, actor, tripId);
-        const blocked = await listBlockingAlerts(tx, tenantId, tripId, actor.membershipId, actor.roles);
+        await loadTripForActor(tx, tenantId, actor, tripId);
+        const blocked = await listBlockingAlerts(
+          tx,
+          tenantId,
+          tripId,
+          actor.membershipId,
+          actor.roles,
+        );
         if (blocked.length > 0) {
           return {
             replay: false,
@@ -489,14 +521,6 @@ export function createTripPort(
           occurredAtDevice: input.occurredAtDevice,
           sourceCommandId: input.clientEventId,
         });
-        if (input.action === 'MARK_NO_SHOW' && tripRow.segment === 'AFTERNOON') {
-          await cancelActiveOverrides(
-            tx,
-            tenantId,
-            locked.studentId,
-            dateOnly(tripRow.serviceDate),
-          );
-        }
         await finishReceipt(tx, tenantId, input.clientEventId, body);
         return body;
       });
@@ -604,6 +628,7 @@ interface PublishedRoute {
   segment: 'MORNING' | 'AFTERNOON';
   versionId: string;
   effectiveFrom: string | Date;
+  maxDetourM: number;
 }
 
 async function generateOne(
@@ -786,7 +811,10 @@ async function generateOne(
 
   // ACTIVE farklı teslimat yalnız akşam seferine TEMP olarak yazılır. Override
   // id korumalı kolondur; INSERT'te yalnız hedef + alıcı + snapshot gider.
-  const overrideSnaps = new Map<string, { receiverName: string; lat: number; lng: number; text: string }>();
+  const overrideSnaps = new Map<
+    string,
+    { receiverName: string; lat: number; lng: number; text: string }
+  >();
   if (input.route.segment === 'AFTERNOON') {
     const activeOverrides = await tx
       .select({
@@ -797,7 +825,10 @@ async function generateOne(
         text: address.text,
       })
       .from(deliveryOverride)
-      .innerJoin(address, and(eq(address.id, deliveryOverride.addressId), eq(address.tenantId, tenantId)))
+      .innerJoin(
+        address,
+        and(eq(address.id, deliveryOverride.addressId), eq(address.tenantId, tenantId)),
+      )
       .where(
         and(
           eq(deliveryOverride.tenantId, tenantId),
@@ -861,6 +892,7 @@ async function generateOne(
 
   const tripStopByRouteStop = new Map<string, string>();
   let schoolTripStopId: string | null = null;
+  let firstPickupTripStopId: string | null = null;
   let lastDropoffTripStopId: string | null = null;
   let schoolSnap: { lat: number; lng: number; text: string } | null = null;
   for (const row of stopRows) {
@@ -884,12 +916,24 @@ async function generateOne(
       schoolTripStopId = inserted.id;
       schoolSnap = { lat: row.lat, lng: row.lng, text: row.addressText };
     }
+    if (row.kind === 'PICKUP' && firstPickupTripStopId === null) {
+      firstPickupTripStopId = inserted.id;
+    }
     if (row.kind === 'DROPOFF') lastDropoffTripStopId = inserted.id;
   }
 
   const expectKind = expectedStopKind(input.route.segment);
   const target = deliveryTargetForSegment(input.route.segment);
   const kindByRouteStop = new Map(stopRows.map((row) => [row.routeStopId, row.kind]));
+  const moveInHomes = await studentHomePoints(
+    tx,
+    tenantId,
+    [...planned.values()]
+      .filter((item) => item.origin === 'MOVED_IN')
+      .map((item) => item.studentId),
+    day,
+    input.route.segment,
+  );
 
   for (const item of planned.values()) {
     const linkedTripStopIds: string[] = [];
@@ -903,27 +947,65 @@ async function generateOne(
         studentId: item.studentId,
       });
     }
-    const preferredRouteStopId =
-      item.routeStopIds.find((id) => kindByRouteStop.get(id) === expectKind) ??
-      item.routeStopIds[0] ??
-      null;
-    const fallbackStopId =
-      expectKind === 'DROPOFF' ? (lastDropoffTripStopId ?? schoolTripStopId) : schoolTripStopId;
-    const expectedId = preferredRouteStopId
-      ? (tripStopByRouteStop.get(preferredRouteStopId) ?? null)
-      : fallbackStopId;
-    if (item.origin === 'MOVED_IN' && expectedId && !linkedTripStopIds.includes(expectedId)) {
-      await tx.insert(tripStopStudent).values({
-        tenantId,
-        tripStopId: expectedId,
-        studentId: item.studentId,
-      });
-    }
-    const stopSnap = preferredRouteStopId
-      ? stopRows.find((row) => row.routeStopId === preferredRouteStopId)
-      : input.route.segment === 'AFTERNOON'
-        ? stopRows.find((row) => tripStopByRouteStop.get(row.routeStopId) === lastDropoffTripStopId)
+    let expectedId: string | null;
+    let stopSnap:
+      | { lat: number; lng: number; addressText: string }
+      | undefined;
+    if (item.origin === 'MOVED_IN') {
+      const home = moveInHomes.get(item.studentId) ?? null;
+      const picked = pickStudentAnchorStop(
+        stopRows.map((row) => ({
+          routeStopId: row.routeStopId,
+          kind: row.kind,
+          lat: row.lat,
+          lng: row.lng,
+        })),
+        home,
+        input.route.segment,
+      );
+      if (!picked) {
+        throw new HttpError(
+          409,
+          home ? 'stop_not_on_route' : 'student_address_missing',
+          home
+            ? 'Transfer öğrencisinin adresi hedef rotada durakla eşleşmiyor'
+            : 'Transfer öğrencisinin adresi yok',
+        );
+      }
+      expectedId = tripStopByRouteStop.get(picked.routeStopId) ?? null;
+      if (expectedId && !linkedTripStopIds.includes(expectedId)) {
+        await tx.insert(tripStopStudent).values({
+          tenantId,
+          tripStopId: expectedId,
+          studentId: item.studentId,
+        });
+      }
+      const pickedRow = stopRows.find((row) => row.routeStopId === picked.routeStopId);
+      if (pickedRow) {
+        stopSnap = { lat: pickedRow.lat, lng: pickedRow.lng, addressText: pickedRow.addressText };
+      }
+    } else {
+      const preferredRouteStopId =
+        item.routeStopIds.find((id) => kindByRouteStop.get(id) === expectKind) ??
+        item.routeStopIds[0] ??
+        null;
+      expectedId = preferredRouteStopId
+        ? (tripStopByRouteStop.get(preferredRouteStopId) ?? null)
+        : expectKind === 'DROPOFF'
+          ? (lastDropoffTripStopId ?? schoolTripStopId)
+          : (firstPickupTripStopId ?? schoolTripStopId);
+      const preferred = preferredRouteStopId
+        ? stopRows.find((row) => row.routeStopId === preferredRouteStopId)
         : undefined;
+      if (preferred) {
+        stopSnap = { lat: preferred.lat, lng: preferred.lng, addressText: preferred.addressText };
+      } else if (input.route.segment === 'AFTERNOON') {
+        const last = stopRows.find(
+          (row) => tripStopByRouteStop.get(row.routeStopId) === lastDropoffTripStopId,
+        );
+        if (last) stopSnap = { lat: last.lat, lng: last.lng, addressText: last.addressText };
+      }
+    }
     const dropoff =
       input.route.segment === 'MORNING'
         ? schoolSnap
@@ -1182,6 +1264,7 @@ async function getDetailTx(
       recordedAt: vehicleCurrentLocation.recordedAt,
       quality: vehicleCurrentLocation.quality,
       isStale: vehicleCurrentLocation.isStale,
+      sessionEpoch: vehicleCurrentLocation.sessionEpoch,
     })
     .from(vehicleCurrentLocation)
     .where(
@@ -1189,18 +1272,17 @@ async function getDetailTx(
         eq(vehicleCurrentLocation.tenantId, tenantId),
         eq(vehicleCurrentLocation.vehicleId, header.vehicleId),
         eq(vehicleCurrentLocation.tripId, tripId),
+        eq(vehicleCurrentLocation.sessionEpoch, header.locationSessionEpoch),
       ),
     );
-  const watchdog = liveRow
-    ? gpsWatchdog(Date.now() - liveRow.recordedAt.getTime())
-    : 'UNAVAILABLE';
+  const watchdog = liveRow ? gpsWatchdog(Date.now() - liveRow.recordedAt.getTime()) : 'UNAVAILABLE';
   const live =
     liveRow && liveRow.quality !== 'REJECTED'
       ? {
           lat: liveRow.lat,
           lng: liveRow.lng,
           heading: liveRow.heading,
-          recordedAt: liveRow.recordedAt.toISOString(),
+          recordedAt: instantIso(liveRow.recordedAt),
           quality: liveRow.quality === 'LOW' ? ('LOW' as const) : ('GOOD' as const),
           isStale: watchdog !== 'LIVE',
         }
@@ -1212,6 +1294,7 @@ async function getDetailTx(
     actor.membershipId,
     actor.roles,
   );
+  const names = await loadMembershipNames(tx, tenantId, [header.driverId, header.attendantId]);
   return {
     ...toSummary(header),
     routeVersionId: header.routeVersionId,
@@ -1220,6 +1303,11 @@ async function getDetailTx(
     students,
     locationSessionEpoch: header.locationSessionEpoch,
     locationSourceDeviceId: header.locationSourceDeviceId,
+    driverMembershipId: header.driverId,
+    attendantMembershipId: header.attendantId,
+    driverName: names.get(header.driverId ?? '') ?? null,
+    attendantName: names.get(header.attendantId ?? '') ?? null,
+    seatCount: header.seatCount,
     live,
     pendingAlerts,
   };
@@ -1241,6 +1329,7 @@ interface TripRow {
   driverId: string | null;
   locationSessionEpoch: number;
   locationSourceDeviceId: string | null;
+  seatCount: number;
 }
 
 async function loadTripForActor(
@@ -1266,6 +1355,7 @@ async function loadTripForActor(
       driverId: trip.currentDriverMembershipId,
       locationSessionEpoch: trip.locationSessionEpoch,
       locationSourceDeviceId: trip.locationSourceDeviceId,
+      seatCount: vehicle.seatCount,
     })
     .from(trip)
     .innerJoin(route, and(eq(route.id, trip.routeId), eq(route.tenantId, tenantId)))
@@ -1348,6 +1438,24 @@ async function loadCrewGuardians(
     result.set(id, { phone: value.phone, name: value.name });
   }
   return result;
+}
+
+async function loadMembershipNames(
+  tx: Database,
+  tenantId: string,
+  membershipIds: Array<string | null>,
+): Promise<Map<string, string>> {
+  const ids = [...new Set(membershipIds.filter((id): id is string => typeof id === 'string'))];
+  if (ids.length === 0) return new Map();
+  const rows = await tx
+    .select({
+      membershipId: tenantMembership.id,
+      fullName: identity.fullName,
+    })
+    .from(tenantMembership)
+    .innerJoin(identity, eq(identity.id, tenantMembership.identityId))
+    .where(and(eq(tenantMembership.tenantId, tenantId), inArray(tenantMembership.id, ids)));
+  return new Map(rows.map((row) => [row.membershipId, row.fullName]));
 }
 
 function toSummary(row: {
@@ -1635,6 +1743,7 @@ async function beginReceipt(
       status: commandReceipt.status,
       commandType: commandReceipt.commandType,
       responseJson: commandReceipt.responseJson,
+      deviceId: commandReceipt.deviceId,
     })
     .from(commandReceipt)
     .where(
@@ -1644,6 +1753,9 @@ async function beginReceipt(
       ),
     )
     .for('update');
+  if (existing?.deviceId && existing.deviceId !== requireDeviceId(actor)) {
+    throw conflict('command_id_reuse', 'clientEventId başka bir cihaz için kullanılmış');
+  }
   if (existing?.commandType && existing.commandType !== input.action) {
     throw conflict('command_id_reuse', 'clientEventId başka bir komut için kullanılmış');
   }

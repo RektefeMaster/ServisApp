@@ -3,7 +3,7 @@
 Okul servisi operasyon sistemi: sabit rota + günlük istisna motoru + canlı sefer +
 öğrenci durum takibi + güvenli farklı teslimat + sağlam olay kaydı.
 
-Onaylanmış kapsam ve mimari kararlar: **[SPEC.md](./SPEC.md)** (rev. 3.2).
+Onaylanmış kapsam ve mimari kararlar: **[SPEC.md](./SPEC.md)** (rev. 3.3).
 
 ## Gereksinimler
 
@@ -44,6 +44,7 @@ görür; `service_role` tarayıcıya ve telefona girmez.
 | `pnpm lint`               | ESLint                                                       |
 | `pnpm test`               | Birim + entegrasyon testleri                                 |
 | `pnpm db:bootstrap-roles` | Uygulama rollerini oluşturur (idempotent, parolalar env'den) |
+| `pnpm db:platform`        | Kill switch / min app sürümü (`--kill-gps=true` …)           |
 | `pnpm db:generate`        | Şemadan migration üretir                                     |
 | `pnpm db:migrate`         | Migration'ları uygular (doğrudan bağlantı; hosted'a değil)   |
 | `pnpm db:seed`            | Yerel demo tohumu                                            |
@@ -55,13 +56,19 @@ apps/api         Fastify — iş mantığının tamamı burada
 apps/admin       Next.js + Tailwind (shadcn hazır)
 apps/parent      Expo 57 — veli
 apps/crew        Expo 57 — şoför + hostes
-apps/simulator   yük & saha senaryosu
+apps/simulator   yük & saha senaryosu (`--vehicles` `--scenario`)
 packages/domain  Saf kurallar: durum makinesi, reconcile, kapasite
 packages/contracts  zod şemaları = API sözleşmesi
 packages/db      Drizzle şema, migration, RLS, fonksiyonlar, roller
 packages/ui      paylaşılan tema / RN bileşenleri
 packages/config  ortak tsconfig
-docs/            domain, KVKK iskeleti, operasyon el kitabı
+docs/            domain, KVKK taslakları, operasyon, mağaza, saha
+```
+
+Simülatör (SPEC §13):
+
+```bash
+pnpm --filter @servisapp/simulator start -- --vehicles=100 --scenario=all
 ```
 
 ## Değişmez kurallar

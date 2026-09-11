@@ -85,6 +85,12 @@ const RULES: Readonly<Record<StudentAction, Rule>> = {
     to: 'RETURNED_HOME',
     actors: CREW,
     tripStates: ['ACTIVE', 'SUSPENDED'],
+    guard: (input) => {
+      if (input.deliveryTarget === 'SCHOOL') return 'ILLEGAL_TRANSITION';
+      return input.deliveryTarget === 'TEMP' && !input.deliveryVerified
+        ? 'TEMP_DELIVERY_REQUIRES_VERIFIED_CODE'
+        : null;
+    },
   },
   // Teslim edilemeyen çocuğun akıbetine uygulama karar vermez; yönetici verir.
   RESOLVE_DELIVERED_LATE: {

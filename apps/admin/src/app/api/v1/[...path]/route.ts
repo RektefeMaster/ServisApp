@@ -20,6 +20,11 @@ const HOP = new Set([
   'cookie',
   'authorization',
   'host',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-forwarded-port',
+  'x-real-ip',
 ]);
 
 async function proxy(

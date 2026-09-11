@@ -39,9 +39,8 @@ export function reconcileStudent(
       if (isOperationalFact(currentState) || currentState === 'MOVED_OUT') {
         return { kind: 'IGNORE', reason: 'OPERATIONAL_FACT_WINS' };
       }
-      if (currentState === 'NO_SHOW') {
-        return { kind: 'FLAG_FOR_REVIEW', reason: 'CONTRADICTS_FIELD_OBSERVATION' };
-      }
+      // NO_SHOW yokluk gözlemidir, teslim adresini çürümez. TEMP uygulanmazsa
+      // çocuk sonradan binince OTP'siz HOME teslimi açılır.
       return { kind: 'APPLY_TARGET', deliveryTarget: 'TEMP' };
     case 'RIDE_EXCEPTION':
     case 'STUDENT_TRIP_MOVE':

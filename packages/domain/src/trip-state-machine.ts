@@ -1,5 +1,5 @@
 import type { ActorRole, StudentState, TripState } from './states.js';
-import { blocksCompletion, isOperationalFact } from './states.js';
+import { blocksCompletion, isOperationalFact, occupiesVehicle } from './states.js';
 
 export type TripRejectionReason =
   | 'ILLEGAL_TRANSITION'
@@ -48,12 +48,19 @@ export function canTransitionTrip(input: TripTransitionInput): TripTransitionRes
   if (!ACTORS[input.to].includes(input.actorRole)) return { ok: false, reason: 'ROLE_NOT_ALLOWED' };
 
   // Ürünün en önemli invariantı: üstünde çocuk varken sefer kapanamaz.
-  // Aynı kontrol DB'de kilit altında tekrarlanır (SPEC §5, Invariant 2).
-  if (input.to === 'COMPLETED') {
+  // COMPLETED/ABORTED çözülmemiş öğrenciyi (EXPECTED dahil) yutamaz.
+  // AUTO_CLOSED "teslim edildi" iddiası değildir ama ON_BOARD/DELIVERY_FAILED
+  // ile kapanmak araçta unutulan çocuk demektir (SPEC §5, Invariant 2).
+  if (input.to === 'COMPLETED' || input.to === 'ABORTED') {
     if (input.studentStates.some(blocksCompletion)) {
       return { ok: false, reason: 'STUDENTS_STILL_ON_TRIP' };
     }
-    if (!input.vehicleSweepConfirmed) return { ok: false, reason: 'VEHICLE_SWEEP_NOT_CONFIRMED' };
+  }
+  if (input.to === 'COMPLETED' && !input.vehicleSweepConfirmed) {
+    return { ok: false, reason: 'VEHICLE_SWEEP_NOT_CONFIRMED' };
+  }
+  if (input.to === 'AUTO_CLOSED' && input.studentStates.some(occupiesVehicle)) {
+    return { ok: false, reason: 'STUDENTS_STILL_ON_TRIP' };
   }
 
   // Tatil/kar iptali başlamamış sefer için serbesttir. Ama fiziksel olarak

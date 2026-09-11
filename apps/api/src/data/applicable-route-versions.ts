@@ -9,6 +9,7 @@ export interface HorizonRouteVersion {
   versionId: string;
   versionNo: number;
   effectiveFrom: string | Date;
+  maxDetourM: number;
 }
 
 function ymdOf(value: string | Date): string {
@@ -33,6 +34,7 @@ export async function loadHorizonRouteVersions(
       versionId: routeVersion.id,
       versionNo: routeVersion.versionNo,
       effectiveFrom: routeVersion.effectiveFrom,
+      maxDetourM: route.maxDetourM,
     })
     .from(routeVersion)
     .innerJoin(route, and(eq(route.id, routeVersion.routeId), eq(route.tenantId, tenantId)))

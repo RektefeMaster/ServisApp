@@ -5,6 +5,7 @@ import { bearerToken, supabaseIssuer, verifyAccessToken, type JwtClaims } from '
 import type { AppData } from '../data/ports.js';
 import type { Env } from '../env.js';
 import { badRequest, forbidden, HttpError, unauthorized, upgradeRequired } from '../http-error.js';
+import { createAuthFailLimiter } from './auth-fail-limit.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -57,6 +58,8 @@ function unboundParentAuth(claims: JwtClaims): AuthContext {
 }
 
 export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppData }): void {
+  const authFails = createAuthFailLimiter();
+
   app.addHook('onRequest', async (request) => {
     const path = request.url.split('?')[0] ?? request.url;
     if (!path.startsWith('/v1')) return;
@@ -101,13 +104,24 @@ export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppD
     if (publicConfig || publicDevLogin || publicParentLogin || publicInvite) return;
 
     const token = bearerToken(request.headers.authorization);
-    if (!token) throw unauthorized();
+    if (!token) {
+      authFails.note(request.ip ?? 'unknown');
+      throw unauthorized();
+    }
 
-    const claims = await verifyAccessToken(token, {
-      secret: deps.env.SUPABASE_JWT_SECRET,
-      issuer: supabaseIssuer(deps.env.SUPABASE_URL),
-      allowHs256: deps.env.NODE_ENV !== 'production' && Boolean(deps.env.SUPABASE_JWT_SECRET),
-    });
+    let claims: JwtClaims;
+    try {
+      claims = await verifyAccessToken(token, {
+        secret: deps.env.SUPABASE_JWT_SECRET,
+        issuer: supabaseIssuer(deps.env.SUPABASE_URL),
+        allowHs256: deps.env.NODE_ENV !== 'production' && Boolean(deps.env.SUPABASE_JWT_SECRET),
+      });
+    } catch (error) {
+      if (error instanceof HttpError && error.statusCode === 401) {
+        authFails.note(request.ip ?? 'unknown');
+      }
+      throw error;
+    }
 
     try {
       const snapshot = await deps.data.session.resolve({

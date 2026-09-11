@@ -15,8 +15,9 @@ import {
   type TripState,
 } from '@servisapp/domain';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { HttpError } from '../http-error.js';
+import { conflict, HttpError } from '../http-error.js';
 import { firstRow, jsonObject } from './sql-result.js';
+import { refreshRoutesIfTripChanged } from './tracking.js';
 
 const OPEN_TRIP_STATES = ['PLANNED', 'READY', 'ACTIVE'] as const;
 
@@ -103,17 +104,60 @@ export async function findOpenTripStudents(
         ...(segment ? [eq(trip.segment, segment)] : []),
       ),
     );
-  return rows.map((row) => ({
+  const tripIds = [...new Set(rows.map((row) => row.tripId))].sort();
+  for (const tripId of tripIds) {
+    await tx.execute(
+      sql`select id from trip where id = ${tripId}::uuid and tenant_id = ${tenantId}::uuid for update`,
+    );
+  }
+  for (const row of [...rows].sort((left, right) =>
+    left.tripStudentId.localeCompare(right.tripStudentId),
+  )) {
+    await tx.execute(sql`select lock_trip_student_for_command(${row.tripStudentId}::uuid)`);
+  }
+  if (rows.length === 0) return [];
+  const locked = await tx
+    .select({
+      tripStudentId: tripStudent.id,
+      tripId: trip.id,
+      tripState: trip.state,
+      segment: trip.segment,
+      studentState: tripStudent.state,
+      stateSeq: tripStudent.stateSeq,
+      deliveryTarget: tripStudent.deliveryTarget,
+      expectedStopId: tripStudent.expectedStopId,
+      vehicleId: trip.currentVehicleId,
+    })
+    .from(tripStudent)
+    .innerJoin(trip, and(eq(trip.id, tripStudent.tripId), eq(trip.tenantId, tenantId)))
+    .where(
+      and(
+        eq(tripStudent.tenantId, tenantId),
+        eq(tripStudent.studentId, studentId),
+        eq(trip.serviceDate, serviceDate),
+        inArray(trip.state, [...OPEN_TRIP_STATES]),
+        ...(segment ? [eq(trip.segment, segment)] : []),
+      ),
+    );
+  return locked.map((row) => ({
     tripStudentId: row.tripStudentId,
     tripId: row.tripId,
-    tripState: row.tripState as TripState,
+    tripState: row.tripState,
     segment: row.segment,
-    studentState: row.studentState as StudentState,
+    studentState: row.studentState,
     stateSeq: row.stateSeq,
     deliveryTarget: row.deliveryTarget,
     expectedStopId: row.expectedStopId,
     vehicleId: row.vehicleId,
   }));
+}
+
+export function requirePlanApplied(planned: { applied: boolean; state: string }): void {
+  if (planned.applied) return;
+  if (planned.state === 'ON_BOARD' || planned.state === 'DELIVERY_FAILED') {
+    throw conflict('student_on_board', 'Çocuk araçta; plan değişikliği uygulanamaz');
+  }
+  throw conflict('operational_fact', 'Operasyon gerçeği planı ezmez');
 }
 
 export async function insertPlanEvent(
@@ -216,7 +260,7 @@ export async function listPendingAlerts(
       if (!isAdmin && required.length > 0 && !required.some((role) => roles.includes(role))) {
         return false;
       }
-      const tripState = row.tripState as Parameters<typeof criticalAlertAutoDropped>[0]['tripState'];
+      const tripState = row.tripState;
       return !criticalAlertAutoDropped({
         tripState,
         stopArrivedAt: row.arrivedAt,
@@ -299,6 +343,9 @@ export async function cancelActiveOverrides(
         stopId: item.expectedStopId,
         body: 'Farklı teslimat iptal; ev adresine bırakılacak',
       });
+    }
+    if (item.tripState === 'ACTIVE') {
+      await refreshRoutesIfTripChanged(tx, tenantId, item.tripId);
     }
   }
 }

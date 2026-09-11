@@ -2,22 +2,30 @@ import type { VehicleBroadcast } from '@servisapp/contracts';
 
 export const TRACKING_ENDED = 'TRIP_TRACKING_ENDED';
 
+/** Test ve son durum için sefer başına tutulan yayın tavanı — üretimde RAM şişmesin. */
+export const REALTIME_HISTORY_CAP = 32;
+
 export interface RealtimeTransport {
   publishVehicle(tripId: string, payload: VehicleBroadcast): void;
   publishEnded(tripId: string): void;
 }
 
 export class MemoryRealtimeTransport implements RealtimeTransport {
-  readonly vehicles: Array<{ tripId: string; payload: VehicleBroadcast }> = [];
-  readonly ended: string[] = [];
+  private readonly history = new Map<string, Array<{ tripId: string; payload: VehicleBroadcast }>>();
+  private readonly ended = new Set<string>();
   private readonly viewers = new Map<string, Set<string>>();
 
   publishVehicle(tripId: string, payload: VehicleBroadcast): void {
-    this.vehicles.push({ tripId, payload });
+    const list = this.history.get(tripId) ?? [];
+    list.push({ tripId, payload });
+    if (list.length > REALTIME_HISTORY_CAP) {
+      list.splice(0, list.length - REALTIME_HISTORY_CAP);
+    }
+    this.history.set(tripId, list);
   }
 
   publishEnded(tripId: string): void {
-    this.ended.push(tripId);
+    this.ended.add(tripId);
     this.viewers.delete(tripId);
   }
 
@@ -36,8 +44,10 @@ export class MemoryRealtimeTransport implements RealtimeTransport {
   }
 
   vehicleBroadcasts(tripId?: string): Array<{ tripId: string; payload: VehicleBroadcast }> {
-    if (!tripId) return [...this.vehicles];
-    return this.vehicles.filter((item) => item.tripId === tripId);
+    if (!tripId) {
+      return [...this.history.values()].flat();
+    }
+    return [...(this.history.get(tripId) ?? [])];
   }
 
   endedTripIds(): string[] {
@@ -45,8 +55,8 @@ export class MemoryRealtimeTransport implements RealtimeTransport {
   }
 
   reset(): void {
-    this.vehicles.length = 0;
-    this.ended.length = 0;
+    this.history.clear();
+    this.ended.clear();
     this.viewers.clear();
   }
 }

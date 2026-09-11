@@ -71,6 +71,10 @@ describe('personel saha odağı', () => {
     expect(focus.destinationLabel).toBe('Güneş İlkokulu');
     expect(focus.nextStudent?.fullName).toBe('Ada Demir');
     expect(focus.remainingOnBoard).toBe(2);
+    expect(crewActionsForStudent(boarded.students[0]!, 'ACTIVE', 'DRIVER')).toEqual([
+      'DELIVER',
+      'MARK_DELIVERY_FAILED',
+    ]);
   });
 
   it('teslim edilemeyen çocuk hâlâ araçta sayılır', () => {
@@ -146,7 +150,6 @@ describe('personel saha odağı', () => {
     });
     expect(crewActionsForStudent(onboard, 'ACTIVE', 'ATTENDANT')).toEqual([
       'MARK_DELIVERY_FAILED',
-      'RETURN_HOME',
     ]);
   });
 

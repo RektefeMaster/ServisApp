@@ -72,6 +72,9 @@ export function evaluateGpsQuality(input: {
     return { quality: 'REJECTED', reason: 'IMPOSSIBLE_SPEED' };
   }
   if (input.lastGood) {
+    if (input.sample.recordedAtMs < input.lastGood.recordedAtMs) {
+      return { quality: 'REJECTED', reason: 'STALE_RECORDED_AT' };
+    }
     const dtSec = Math.max(1, (input.sample.recordedAtMs - input.lastGood.recordedAtMs) / 1000);
     const distance = haversineMeters(input.lastGood, input.sample);
     const implied = distance / dtSec;

@@ -16,7 +16,7 @@ async function sign(claims: Record<string, unknown>, subValue = sub): Promise<st
     .sign(new TextEncoder().encode(secret));
 }
 
-async function hsInput(): Promise<{ secret: string; issuer: string; allowHs256: true }> {
+function hsInput(): { secret: string; issuer: string; allowHs256: true } {
   return { secret, issuer, allowHs256: true };
 }
 
@@ -27,8 +27,9 @@ describe('JWT doğrulama', () => {
       phone: '+905321234567',
       email: 'ayse@example.com',
       email_verified: true,
+      phone_verified: true,
     });
-    await expect(verifyAccessToken(token, await hsInput())).resolves.toMatchObject({
+    await expect(verifyAccessToken(token, hsInput())).resolves.toMatchObject({
       authUserId: sub,
       phone: '+905321234567',
       email: 'ayse@example.com',
@@ -37,7 +38,7 @@ describe('JWT doğrulama', () => {
 
   it('service_role jetonunu reddeder', async () => {
     const token = await sign({ role: 'service_role' });
-    await expect(verifyAccessToken(token, await hsInput())).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, hsInput())).rejects.toMatchObject({
       statusCode: 401,
     });
   });
@@ -50,14 +51,14 @@ describe('JWT doğrulama', () => {
       .setAudience('authenticated')
       .setExpirationTime('1h')
       .sign(new TextEncoder().encode(secret));
-    await expect(verifyAccessToken(token, await hsInput())).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, hsInput())).rejects.toMatchObject({
       statusCode: 401,
     });
   });
 
   it('UUID olmayan sub reddedilir', async () => {
     const token = await sign({ role: 'authenticated' }, 'not-a-uuid');
-    await expect(verifyAccessToken(token, await hsInput())).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, hsInput())).rejects.toMatchObject({
       statusCode: 401,
     });
   });
@@ -67,7 +68,7 @@ describe('JWT doğrulama', () => {
       role: 'authenticated',
       email: 'ayse@example.com',
     });
-    const claims = await verifyAccessToken(token, await hsInput());
+    const claims = await verifyAccessToken(token, hsInput());
     expect(claims.email).toBeNull();
   });
 
@@ -77,7 +78,7 @@ describe('JWT doğrulama', () => {
       email: 'ayse@example.com',
       user_metadata: { email_verified: true },
     });
-    const claims = await verifyAccessToken(token, await hsInput());
+    const claims = await verifyAccessToken(token, hsInput());
     expect(claims.email).toBeNull();
   });
 
@@ -85,9 +86,29 @@ describe('JWT doğrulama', () => {
     const token = await sign({
       role: 'authenticated',
       phone: '905321234567',
+      phone_verified: true,
     });
-    const claims = await verifyAccessToken(token, await hsInput());
+    const claims = await verifyAccessToken(token, hsInput());
     expect(claims.phone).toBe('+905321234567');
+  });
+
+  it('doğrulanmamış telefon ile kimlik bağlanmaz', async () => {
+    const token = await sign({
+      role: 'authenticated',
+      phone: '+905321234567',
+    });
+    const claims = await verifyAccessToken(token, hsInput());
+    expect(claims.phone).toBeNull();
+  });
+
+  it('user_metadata içindeki phone_verified iddiayı bağlama için yetmez', async () => {
+    const token = await sign({
+      role: 'authenticated',
+      phone: '+905321234567',
+      user_metadata: { phone_verified: true },
+    });
+    const claims = await verifyAccessToken(token, hsInput());
+    expect(claims.phone).toBeNull();
   });
 
   it('HS256 jetonunu secret yokken reddeder', async () => {

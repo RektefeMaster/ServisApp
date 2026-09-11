@@ -11,9 +11,11 @@ import {
   tripStudent,
   type Database,
 } from '@servisapp/db';
-import { and, desc, eq, inArray } from 'drizzle-orm';
-import { notFound } from '../http-error.js';
+import { occupiesVehicle } from '@servisapp/domain';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { conflict, notFound } from '../http-error.js';
 import { loadAssignments, loadPinnedUsages, planForStudent } from './plan-query.js';
+import { applyTripStudentPlan, requirePlanApplied } from './plan-reconcile.js';
 import type { StaffListItem, StudentGuardianView, StudentListItem } from './ports.js';
 
 export async function listStaffTx(tx: Database, tenantId: string): Promise<StaffListItem[]> {
@@ -133,13 +135,13 @@ export async function endStudentTx(
   studentId: string,
   enrollmentEnd: string,
 ): Promise<{ id: string; enrollmentEnd: string }> {
+  await dropStudentFromOpenTrips(tx, tenantId, studentId);
   const [row] = await tx
     .update(student)
     .set({ enrollmentEnd })
     .where(and(eq(student.id, studentId), eq(student.tenantId, tenantId)))
     .returning({ id: student.id, enrollmentEnd: student.enrollmentEnd });
   if (!row?.enrollmentEnd) throw notFound('Öğrenci bulunamadı');
-  await dropStudentFromOpenTrips(tx, tenantId, studentId);
   return { id: row.id, enrollmentEnd: row.enrollmentEnd };
 }
 
@@ -149,30 +151,57 @@ async function dropStudentFromOpenTrips(
   studentId: string,
 ): Promise<void> {
   const rows = await tx
-    .select({ id: tripStudent.id })
+    .select({
+      tripStudentId: tripStudent.id,
+      tripId: trip.id,
+      state: tripStudent.state,
+    })
     .from(tripStudent)
     .innerJoin(trip, and(eq(trip.id, tripStudent.tripId), eq(trip.tenantId, tenantId)))
     .where(
       and(
         eq(tripStudent.tenantId, tenantId),
         eq(tripStudent.studentId, studentId),
-        eq(tripStudent.state, 'EXPECTED'),
-        inArray(trip.state, ['PLANNED', 'READY']),
+        inArray(trip.state, ['PLANNED', 'READY', 'ACTIVE']),
       ),
     );
-  if (rows.length === 0) return;
-  await tx
-    .update(tripStudent)
-    .set({ state: 'MOVED_OUT' })
-    .where(
-      and(
-        eq(tripStudent.tenantId, tenantId),
-        inArray(
-          tripStudent.id,
-          rows.map((row) => row.id),
-        ),
-      ),
+  const tripIds = [...new Set(rows.map((row) => row.tripId))].sort();
+  for (const tripId of tripIds) {
+    await tx.execute(
+      sql`select id from trip where id = ${tripId}::uuid and tenant_id = ${tenantId}::uuid for update`,
     );
+  }
+  for (const row of [...rows].sort((left, right) =>
+    left.tripStudentId.localeCompare(right.tripStudentId),
+  )) {
+    await tx.execute(sql`select lock_trip_student_for_command(${row.tripStudentId}::uuid)`);
+  }
+  const locked =
+    rows.length === 0
+      ? []
+      : await tx
+          .select({
+            tripStudentId: tripStudent.id,
+            state: tripStudent.state,
+          })
+          .from(tripStudent)
+          .innerJoin(trip, and(eq(trip.id, tripStudent.tripId), eq(trip.tenantId, tenantId)))
+          .where(
+            and(
+              eq(tripStudent.tenantId, tenantId),
+              eq(tripStudent.studentId, studentId),
+              inArray(trip.state, ['PLANNED', 'READY', 'ACTIVE']),
+            ),
+          );
+  if (locked.some((row) => occupiesVehicle(row.state))) {
+    throw conflict('student_on_board', 'Çocuk araçta; kayıt sonlandırılamaz');
+  }
+  for (const row of locked) {
+    if (row.state !== 'EXPECTED' && row.state !== 'ABSENT_PLANNED') continue;
+    requirePlanApplied(
+      await applyTripStudentPlan(tx, { tripStudentId: row.tripStudentId, state: 'MOVED_OUT' }),
+    );
+  }
 }
 
 export async function revokeGuardianTx(

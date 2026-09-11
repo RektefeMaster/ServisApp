@@ -37,6 +37,7 @@ export function registerDevRoutes(app: FastifyInstance, env: Env, data: AppData)
       email: identity.email,
       email_verified: true,
       phone: identity.phone,
+      phone_verified: true,
     })
       .setProtectedHeader({ alg: 'HS256' })
       .setSubject(authUserId)
@@ -69,6 +70,7 @@ export function registerDevRoutes(app: FastifyInstance, env: Env, data: AppData)
     const token = await new SignJWT({
       role: 'authenticated',
       phone: identity.phone,
+      phone_verified: true,
       ...(identity.email ? { email: identity.email, email_verified: true } : {}),
     })
       .setProtectedHeader({ alg: 'HS256' })

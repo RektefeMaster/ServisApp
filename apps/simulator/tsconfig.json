@@ -5,5 +5,5 @@
     "noEmit": true,
     "tsBuildInfoFile": "./dist/.tsbuildinfo-check"
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "vitest.config.ts"]
 }

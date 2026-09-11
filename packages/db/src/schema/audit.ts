@@ -4,6 +4,7 @@ import {
   boolean,
   doublePrecision,
   foreignKey,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -55,6 +56,7 @@ export const event = pgTable(
   },
   (t) => [
     unique('event_pk').on(t.seq, t.occurredAtServer),
+    index('event_tenant_occurred_idx').on(t.tenantId, t.occurredAtServer),
     foreignKey({
       name: 'event_actor_fk',
       columns: [t.tenantId, t.actorMembershipId],

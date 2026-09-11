@@ -77,6 +77,7 @@ export const createStaffInput = z.object({
   role: staffRole,
   vehicleId: uuid.optional(),
   validFrom: z.iso.date().optional(),
+  reuseIdentityId: uuid.optional(),
 });
 export type CreateStaffInput = z.infer<typeof createStaffInput>;
 

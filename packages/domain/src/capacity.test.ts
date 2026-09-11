@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkCapacity, peakOccupancy } from './capacity.js';
+import { checkCapacity, countsTowardCapacity, peakOccupancy } from './capacity.js';
 
 describe('kapasite — anlık zirve doluluk', () => {
   it('akşam rotasında zirve ilk durakta oluşur', () => {
@@ -42,5 +42,24 @@ describe('kapasite — anlık zirve doluluk', () => {
       { seq: 2, boarding: 0, alighting: 10 },
     ];
     expect(peakOccupancy(stops)).toBe(40);
+  });
+
+  it('fazla iniş sonraki biniş zirvesini gizlemez', () => {
+    const stops = [
+      { seq: 1, boarding: 0, alighting: 8 },
+      { seq: 2, boarding: 18, alighting: 0 },
+    ];
+    expect(peakOccupancy(stops)).toBe(18);
+    expect(checkCapacity(stops, 17)).toEqual({ ok: false, peak: 18, seatCount: 17 });
+  });
+
+  it('teslim ve taşınmış öğrenciyi koltuk hesabına katmaz', () => {
+    expect(countsTowardCapacity('EXPECTED')).toBe(true);
+    expect(countsTowardCapacity('ON_BOARD')).toBe(true);
+    expect(countsTowardCapacity('DELIVERY_FAILED')).toBe(true);
+    expect(countsTowardCapacity('DELIVERED')).toBe(false);
+    expect(countsTowardCapacity('MOVED_OUT')).toBe(false);
+    expect(countsTowardCapacity('ABSENT_PLANNED')).toBe(true);
+    expect(countsTowardCapacity('NO_SHOW')).toBe(true);
   });
 });

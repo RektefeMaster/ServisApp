@@ -65,13 +65,48 @@ describe('sefer kapanışı — ürünün en önemli invariantı', () => {
   });
 
   it('sistem seferi COMPLETED yazamaz — yalnız AUTO_CLOSED', () => {
-    const states = { from: 'ACTIVE', studentStates: ['ON_BOARD'] as const } as const;
-    expect(canTransitionTrip({ ...base, ...states, to: 'COMPLETED', actorRole: 'SYSTEM' })).toEqual(
-      { ok: false, reason: 'ROLE_NOT_ALLOWED' },
-    );
     expect(
-      canTransitionTrip({ ...base, ...states, to: 'AUTO_CLOSED', actorRole: 'SYSTEM' }),
+      canTransitionTrip({
+        ...base,
+        from: 'ACTIVE',
+        to: 'COMPLETED',
+        actorRole: 'SYSTEM',
+        studentStates: ['ON_BOARD'],
+      }),
+    ).toEqual({ ok: false, reason: 'ROLE_NOT_ALLOWED' });
+    expect(
+      canTransitionTrip({
+        ...base,
+        from: 'ACTIVE',
+        to: 'AUTO_CLOSED',
+        actorRole: 'SYSTEM',
+        studentStates: ['NO_SHOW'],
+      }),
     ).toEqual({ ok: true });
+  });
+
+  it('AUTO_CLOSED araçtaki çocukla kapanamaz', () => {
+    expect(
+      canTransitionTrip({
+        ...base,
+        from: 'ACTIVE',
+        to: 'AUTO_CLOSED',
+        actorRole: 'SYSTEM',
+        studentStates: ['ON_BOARD'],
+      }),
+    ).toEqual({ ok: false, reason: 'STUDENTS_STILL_ON_TRIP' });
+  });
+
+  it('ABORTED çözülmemiş öğrenciyle kapanamaz', () => {
+    expect(
+      canTransitionTrip({
+        ...base,
+        from: 'ACTIVE',
+        to: 'ABORTED',
+        actorRole: 'ADMIN',
+        studentStates: ['EXPECTED'],
+      }),
+    ).toEqual({ ok: false, reason: 'STUDENTS_STILL_ON_TRIP' });
   });
 });
 

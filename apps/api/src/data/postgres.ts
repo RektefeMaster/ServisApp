@@ -9,7 +9,7 @@ import type {
   PlatformConfig,
   SessionSnapshot,
 } from '@servisapp/contracts';
-import { hasUsableCoordinates, namesLikelySame } from '@servisapp/domain';
+import { hasUsableCoordinates } from '@servisapp/domain';
 import {
   address,
   createDbFromSql,
@@ -27,7 +27,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import type postgres from 'postgres';
 import { HttpError } from '../http-error.js';
 import { mapDbError } from './db-error.js';
-import { attachMembership, ensureIdentityId, findIdentityByPhone, resolveGuardianIdentity } from './identity-write.js';
+import { attachMembership, resolveGuardianIdentity } from './identity-write.js';
 import { createOnboarding, type OnboardingOptions, upsertGuardianLink } from './onboarding.js';
 import { loadParentChildren } from './plan-query.js';
 import type { AdminPort, AppData, SessionPort, TripPort } from './ports.js';
@@ -43,6 +43,7 @@ import { MemoryRealtimeTransport } from '../realtime/memory.js';
 import { createTrackingPort } from './tracking.js';
 import { createTripPort } from './trips.js';
 import { createExceptionsPort } from './exceptions.js';
+import { createOperationsPort } from './operations.js';
 
 interface SessionRow {
   identityId: string;
@@ -129,6 +130,7 @@ export function createPostgresData(
       exceptions.ackCriticalChange(tenantId, actor, tripId, alertId),
   };
   const onboarding = createOnboarding(db, onboardingOptions);
+  const operations = createOperationsPort(db);
   const adminCore = createAdminPort(db);
   return {
     getPlatform: () => readPlatform(sqlClient),
@@ -138,7 +140,7 @@ export function createPostgresData(
       previewInvite: (token) => onboarding.previewInvite(token),
       activateInvite: (token, auth) => onboarding.activateInvite(token, auth),
       listChildren(tenantId, membershipId) {
-        return withAdmin(db, tenantId, membershipId, async (tx) => {
+        return withGuardian(db, tenantId, membershipId, async (tx) => {
           const [membership] = await tx
             .select({ status: tenantMembership.status })
             .from(tenantMembership)
@@ -210,7 +212,16 @@ export function createPostgresData(
       getTripDetail(tenantId, actor, tripId) {
         return trips.getDetail(tenantId, actor, tripId);
       },
-      listEventsUnavailable: () => ({ items: [], available: false as const }),
+      assignTripVehicle: (tenantId, actor, tripId, input) =>
+        operations.assignVehicle(tenantId, actor, tripId, input),
+      assignTripCrew: (tenantId, actor, tripId, input) =>
+        operations.assignCrew(tenantId, actor, tripId, input),
+      transferStudent: (tenantId, actor, input) =>
+        operations.transferStudent(tenantId, actor, input),
+      listEvents: (tenantId, membershipId, date) =>
+        operations.listEvents(tenantId, membershipId, date),
+      listPriorities: (tenantId, membershipId, date) =>
+        operations.listPriorities(tenantId, membershipId, date),
       listExceptions: (tenantId, membershipId) =>
         exceptions.listAdminExceptions(tenantId, membershipId),
       approveDeliveryOverride: (tenantId, membershipId, overrideId) =>
@@ -343,6 +354,19 @@ async function withAdmin<T>(
   }
 }
 
+async function withGuardian<T>(
+  db: Database,
+  tenantId: string,
+  membershipId: string,
+  fn: (tx: Database) => Promise<T>,
+): Promise<T> {
+  try {
+    return await withTenant(db, { tenantId, membershipId, role: 'GUARDIAN' }, fn);
+  } catch (error) {
+    mapDbError(error);
+  }
+}
+
 type SetupAdmin = Pick<
   AdminPort,
   | 'pinAddress'
@@ -463,15 +487,12 @@ function createAdminPort(db: Database): SetupAdmin {
 
     createStaff(tenantId, actorMembershipId, input: CreateStaffInput) {
       return withAdmin(db, tenantId, actorMembershipId, async (tx) => {
-        const existing = await findIdentityByPhone(tx, input.phone);
-        let identityId: string;
-        if (!existing) {
-          identityId = await ensureIdentityId(tx, input.phone, input.email, input.fullName);
-        } else if (namesLikelySame(existing.fullName, input.fullName)) {
-          identityId = existing.id;
-        } else {
-          throw new HttpError(409, 'phone_in_use', 'Bu telefon mevcut bir kişide kullanılıyor');
-        }
+        const identityId = await resolveGuardianIdentity(tx, tenantId, {
+          phone: input.phone,
+          fullName: input.fullName,
+          email: input.email,
+          reuseIdentityId: input.reuseIdentityId,
+        });
         const membershipId = await attachMembership(tx, tenantId, identityId, input.role);
 
         if (input.vehicleId && input.role !== 'ADMIN') {
@@ -553,7 +574,7 @@ function createAdminPort(db: Database): SetupAdmin {
           .where(and(eq(student.id, studentId), eq(student.tenantId, tenantId)));
         if (!existing) throw new HttpError(404, 'not_found', 'Öğrenci bulunamadı');
 
-        const identityId = await resolveGuardianIdentity(tx, {
+        const identityId = await resolveGuardianIdentity(tx, tenantId, {
           phone: input.phone,
           fullName: input.fullName,
           reuseIdentityId: input.reuseIdentityId,

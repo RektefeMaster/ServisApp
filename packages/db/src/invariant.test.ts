@@ -98,6 +98,24 @@ describe('sefer kapanışı', () => {
       harness.sql`update trip set state = 'COMPLETED' where id = ${world.tripId}`,
     ).rejects.toThrow(/trip_not_active/);
   });
+
+  it('AUTO_CLOSED araçtaki çocukla yazılamaz', async () => {
+    const world = await insertWorld(harness.sql);
+    await harness.sql`
+      update trip_student set state = 'ON_BOARD', state_seq = 1
+      where id = ${world.tripStudentId}
+    `;
+    await expect(
+      harness.sql`update trip set state = 'AUTO_CLOSED' where id = ${world.tripId}`,
+    ).rejects.toThrow(/students_still_on_trip/);
+  });
+
+  it('ABORTED çözülmemiş öğrenciyle yazılamaz', async () => {
+    const world = await insertWorld(harness.sql);
+    await expect(
+      harness.sql`update trip set state = 'ABORTED' where id = ${world.tripId}`,
+    ).rejects.toThrow(/students_still_on_trip/);
+  });
 });
 
 describe('TEMP teslimat', () => {
@@ -174,6 +192,22 @@ describe('TEMP teslimat', () => {
     await expect(
       harness.sql`
         update trip_student set state = 'DELIVERED_LATE'
+        where id = ${world.tripStudentId}
+      `,
+    ).rejects.toThrow(/temp_delivery_requires_verification/);
+  });
+
+  it('doğrulanmamış TEMP teslimat RETURNED_HOME olamaz', async () => {
+    const world = await insertWorld(harness.sql);
+    await harness.sql`
+      update trip_student
+      set state = 'ON_BOARD', delivery_target = 'TEMP', state_seq = 1
+      where id = ${world.tripStudentId}
+    `;
+
+    await expect(
+      harness.sql`
+        update trip_student set state = 'RETURNED_HOME'
         where id = ${world.tripStudentId}
       `,
     ).rejects.toThrow(/temp_delivery_requires_verification/);
@@ -595,6 +629,48 @@ describe('şema emniyeti', () => {
     expect(session?.memberships[0]?.roles).toContain('DRIVER');
   });
 
+  it('resolve_session GUARDIAN davetini personel rolüyle atlatmaz', async () => {
+    const world = await insertWorld(harness.sql);
+    const authUserId = randomUUID();
+    const phone = `+9055${randomUUID().replace(/\D/g, '').slice(0, 8).padEnd(8, '0')}`;
+    const [person] = await harness.sql<{ id: string }[]>`
+      insert into identity (phone_e164, full_name)
+      values (${phone}, 'Veli Şoför')
+      returning id
+    `;
+    if (!person) throw new Error('identity insert failed');
+    const [membership] = await harness.sql<{ id: string }[]>`
+      insert into tenant_membership (tenant_id, identity_id, status)
+      values (${world.tenantA}, ${person.id}::uuid, 'INVITED')
+      returning id
+    `;
+    if (!membership) throw new Error('membership insert failed');
+    await harness.sql`
+      insert into membership_role (tenant_id, membership_id, role)
+      values
+        (${world.tenantA}, ${membership.id}::uuid, 'GUARDIAN'),
+        (${world.tenantA}, ${membership.id}::uuid, 'DRIVER')
+    `;
+
+    const sessionRows = await harness.sql.begin(async (tx) => {
+      await tx.unsafe('set local role servisapp_api');
+      return tx<
+        { session: { identityId: string; memberships: { status: string; roles: string[] }[] } }[]
+      >`
+        select resolve_session(${authUserId}::uuid, ${phone}, null) as session
+      `;
+    });
+    const session = sessionRows[0]?.session;
+    expect(session?.identityId).toBe(person.id);
+    expect(session?.memberships[0]?.status).toBe('INVITED');
+    expect(session?.memberships[0]?.roles).toEqual(expect.arrayContaining(['DRIVER', 'GUARDIAN']));
+
+    const [status] = await harness.sql<{ status: string }[]>`
+      select status::text from tenant_membership where id = ${membership.id}::uuid
+    `;
+    expect(status?.status).toBe('INVITED');
+  });
+
   it('resolve_session e-posta ile bağlanmamış kimliği gasp etmez', async () => {
     const world = await insertWorld(harness.sql);
     const authUserId = randomUUID();
@@ -927,5 +1003,53 @@ describe('rota sürüm emniyeti', () => {
         values (${world.tenantA}, ${version.id}, ${world.stopId}, 2, 'SCHOOL')
       `,
     ).rejects.toThrow(/route_stop_stop/);
+  });
+});
+
+describe('OTP ve plan koruması', () => {
+  it('API mevcut OTP hmac değerini değiştiremez', async () => {
+    const world = await insertWorld(harness.sql);
+    const overrideId = randomUUID();
+    await harness.sql`
+      insert into delivery_override (
+        id, tenant_id, student_id, service_date, address_id,
+        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, status
+      ) values (
+        ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
+        'Teyze', '+905321119997', '\\x00'::bytea, '\\x01'::bytea, 'ACTIVE'
+      )
+    `;
+    await expect(
+      asApi(
+        harness.sql,
+        world.tenantA,
+        (tx) =>
+          tx`update delivery_override set otp_hmac = '\\x02'::bytea where id = ${overrideId}`,
+      ),
+    ).rejects.toThrow(/otp_columns_are_protected/);
+  });
+
+  it('operasyon gerçeğinde plan dropoff yazılamaz', async () => {
+    const world = await insertWorld(harness.sql);
+    await harness.sql`
+      update trip_student set state = 'ON_BOARD', state_seq = 1
+      where id = ${world.tripStudentId}
+    `;
+    const [row] = await asApi(
+      harness.sql,
+      world.tenantA,
+      (tx) =>
+        tx<{ result: { applied: boolean; reason: string } }[]>`
+          select apply_trip_student_plan(
+            ${world.tripStudentId}::uuid,
+            false, 'EXPECTED'::student_state,
+            false, 'HOME'::delivery_target,
+            false, false,
+            false, null,
+            true, 40.1, 29.1, 'yanlış adres'
+          ) as result
+        `,
+    );
+    expect(row?.result).toMatchObject({ applied: false, reason: 'operational_fact' });
   });
 });

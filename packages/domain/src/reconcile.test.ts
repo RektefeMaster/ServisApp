@@ -74,10 +74,10 @@ describe('reconcile — plan ile operasyon gerçeği sınırı', () => {
     });
   });
 
-  it('kapıda yokken gelen farklı teslimat sessizce ezmez', () => {
+  it('kapıda yokken gelen farklı teslimat yine TEMP olur', () => {
     expect(reconcileStudent('NO_SHOW', 'DELIVERY_OVERRIDE')).toEqual({
-      kind: 'FLAG_FOR_REVIEW',
-      reason: 'CONTRADICTS_FIELD_OBSERVATION',
+      kind: 'APPLY_TARGET',
+      deliveryTarget: 'TEMP',
     });
   });
 });

@@ -104,20 +104,24 @@ function latLng(point: RoutePoint): { location: { latLng: { latitude: number; lo
   };
 }
 
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 export function parseLegs(points: readonly RoutePoint[], body: unknown): BaselineLeg[] | null {
-  if (!body || typeof body !== 'object') return null;
-  const routes = (body as { routes?: unknown }).routes;
-  if (!Array.isArray(routes) || !routes[0] || typeof routes[0] !== 'object') return null;
-  const legsRaw = (routes[0] as { legs?: unknown }).legs;
+  if (!isJsonRecord(body)) return null;
+  const routes = body['routes'];
+  if (!Array.isArray(routes) || !isJsonRecord(routes[0])) return null;
+  const legsRaw = routes[0]['legs'];
   if (!Array.isArray(legsRaw) || legsRaw.length !== points.length - 1) return null;
   const legs: BaselineLeg[] = [];
   for (let i = 0; i < legsRaw.length; i += 1) {
     const from = points[i];
     const to = points[i + 1];
-    const raw = legsRaw[i];
-    if (!from || !to || !raw || typeof raw !== 'object') return null;
-    const duration = durationSec((raw as { duration?: unknown }).duration);
-    const distanceM = Number((raw as { distanceMeters?: unknown }).distanceMeters);
+    const raw: unknown = legsRaw[i];
+    if (!from || !to || !isJsonRecord(raw)) return null;
+    const duration = durationSec(raw['duration']);
+    const distanceM = Number(raw['distanceMeters']);
     if (duration === null || !Number.isFinite(distanceM) || distanceM < 0) return null;
     legs.push({
       fromStopId: from.id,
@@ -137,8 +141,8 @@ export function durationSec(value: unknown): number | null {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? Math.max(1, Math.round(numeric)) : null;
   }
-  if (value && typeof value === 'object' && 'seconds' in value) {
-    const numeric = Number((value as { seconds: unknown }).seconds);
+  if (isJsonRecord(value) && 'seconds' in value) {
+    const numeric = Number(value['seconds']);
     return Number.isFinite(numeric) ? Math.max(1, Math.round(numeric)) : null;
   }
   return null;

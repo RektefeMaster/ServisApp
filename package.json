@@ -18,6 +18,7 @@
     "db:migrate": "pnpm --filter @servisapp/db migrate",
     "db:seed": "pnpm --filter @servisapp/db seed",
     "db:bootstrap-roles": "pnpm --filter @servisapp/db bootstrap-roles",
+    "db:platform": "pnpm --filter @servisapp/db platform",
     "dev:api": "pnpm --filter @servisapp/api dev",
     "dev:worker": "pnpm --filter @servisapp/api dev:worker"
   },

@@ -259,10 +259,6 @@ export function createOnboarding(db: Database, options: OnboardingOptions) {
           })
           .returning({ id: inviteSms.id });
         if (!sms) throw new HttpError(500, 'insert_failed', 'SMS kuyruğa alınamadı');
-        await tx
-          .update(inviteSms)
-          .set({ status: 'SENT', updatedAt: new Date() })
-          .where(and(eq(inviteSms.id, sms.id), eq(inviteSms.tenantId, tenantId)));
         return toInviteView(tx, options, tenantId, invite.id, null);
       });
     },
@@ -456,8 +452,9 @@ async function classifyRow(
   const visibleId = existing && sameTenant ? existing.id : null;
   const visibleName = existing && sameTenant ? existing.fullName : null;
   if (existing) {
-    const reuseOk =
-      row.reuseIdentityId === existing.id || namesLikelySame(existing.fullName, row.guardianFullName);
+    const explicit = row.reuseIdentityId === existing.id;
+    const sameName = namesLikelySame(existing.fullName, row.guardianFullName);
+    const reuseOk = (sameTenant && (explicit || sameName)) || (!sameTenant && explicit);
     if (!reuseOk) {
       return {
         status: 'NEEDS_FIX',
@@ -546,7 +543,7 @@ async function commitOneRow(
     })
     .returning({ id: student.id });
   if (!created) throw new HttpError(500, 'insert_failed', 'Öğrenci kaydedilemedi');
-  const identityId = await resolveGuardianIdentity(tx, {
+  const identityId = await resolveGuardianIdentity(tx, tenantId, {
     phone: parsed.guardianPhone,
     fullName: parsed.guardianFullName,
     reuseIdentityId: parsed.reuseIdentityId ?? classified.existingIdentityId ?? undefined,

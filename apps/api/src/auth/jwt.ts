@@ -80,7 +80,7 @@ export async function verifyAccessToken(token: string, input: JwtVerifyInput): P
     }
     return {
       authUserId,
-      phone: e164Phone(stringClaim(payload['phone'])),
+      phone: phoneVerified(payload) ? e164Phone(stringClaim(payload['phone'])) : null,
       email: emailVerified(payload) ? emailClaim(payload['email']) : null,
     };
   } catch (error) {
@@ -92,6 +92,10 @@ export async function verifyAccessToken(token: string, input: JwtVerifyInput): P
 function emailVerified(payload: JWTPayload): boolean {
   // user_metadata GoTrue'da kullanıcı tarafından yazılabilir; yetki kararı olmaz.
   return payload['email_verified'] === true || payload['email_confirmed'] === true;
+}
+
+function phoneVerified(payload: JWTPayload): boolean {
+  return payload['phone_verified'] === true || payload['phone_confirmed'] === true;
 }
 
 function e164Phone(value: string | null): string | null {

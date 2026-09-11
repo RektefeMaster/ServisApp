@@ -155,6 +155,11 @@ export const tripDetail = tripSummary.extend({
   students: z.array(tripStudentView),
   locationSessionEpoch: z.number().int().nonnegative(),
   locationSourceDeviceId: uuid.nullable(),
+  driverMembershipId: uuid.nullable(),
+  attendantMembershipId: uuid.nullable(),
+  driverName: z.string().nullable(),
+  attendantName: z.string().nullable(),
+  seatCount: z.number().int().positive(),
   live: tripLiveLocation.nullable(),
   pendingAlerts: z.array(criticalAlertView).default([]),
 });
@@ -169,6 +174,82 @@ export const commandResult = z.object({
   reason: z.string().optional(),
 });
 export type CommandResult = z.infer<typeof commandResult>;
+
+export const assignTripVehicleInput = z.object({
+  vehicleId: uuid,
+  reason: z.string().trim().min(3).max(500),
+});
+export type AssignTripVehicleInput = z.infer<typeof assignTripVehicleInput>;
+
+export const assignTripCrewInput = z.object({
+  role: z.enum(['DRIVER', 'ATTENDANT']),
+  membershipId: uuid,
+  reason: z.string().trim().min(3).max(500),
+});
+export type AssignTripCrewInput = z.infer<typeof assignTripCrewInput>;
+
+export const createStudentTripMoveInput = z.object({
+  studentId: uuid,
+  serviceDate,
+  segment: tripSegment,
+  targetRouteId: uuid,
+  reason: z.string().trim().min(3).max(500),
+});
+export type CreateStudentTripMoveInput = z.infer<typeof createStudentTripMoveInput>;
+
+export const studentTripMoveResult = z.object({
+  studentId: uuid,
+  serviceDate,
+  segment: tripSegment,
+  targetRouteId: uuid,
+  sourceTripId: uuid.nullable(),
+  targetTripId: uuid.nullable(),
+  sourceState: studentState.nullable(),
+});
+export type StudentTripMoveResult = z.infer<typeof studentTripMoveResult>;
+
+export const adminEventView = z.object({
+  seq: z.number().int(),
+  occurredAt: instant,
+  eventType: z.string(),
+  subjectType: z.string(),
+  subjectId: uuid,
+  tripId: uuid.nullable(),
+  prevState: z.string().nullable(),
+  newState: z.string().nullable(),
+  actorRole: z.string().nullable(),
+});
+export type AdminEventView = z.infer<typeof adminEventView>;
+
+export const adminEventsList = z.object({
+  available: z.literal(true),
+  items: z.array(adminEventView),
+  csv: z.string(),
+});
+export type AdminEventsList = z.infer<typeof adminEventsList>;
+
+export const adminPriorityKind = z.enum([
+  'GPS_STALE',
+  'CRITICAL_UNACKED',
+  'OTP_LOCKED',
+  'OVERRIDE_PENDING',
+  'NEEDS_REVIEW',
+]);
+export type AdminPriorityKind = z.infer<typeof adminPriorityKind>;
+
+export const adminPriorityView = z.object({
+  kind: adminPriorityKind,
+  severity: z.enum(['WARNING', 'CRITICAL']),
+  tripId: uuid.nullable(),
+  plate: z.string().nullable(),
+  body: z.string(),
+});
+export type AdminPriorityView = z.infer<typeof adminPriorityView>;
+
+export const adminPrioritiesList = z.object({
+  items: z.array(adminPriorityView),
+});
+export type AdminPrioritiesList = z.infer<typeof adminPrioritiesList>;
 
 export const reportIncidentInput = z.object({
   body: z.string().trim().min(3).max(500),

@@ -16,9 +16,15 @@ import type {
   GenerateTripsInput,
   PinAddressInput,
   PlatformConfig,
+  AdminEventsList,
+  AdminPrioritiesList,
+  AssignTripCrewInput,
+  AssignTripVehicleInput,
+  CreateStudentTripMoveInput,
   LocationIngestResult,
   LocationPingInput,
   ParentDayPlan,
+  StudentTripMoveResult,
   ParentHome,
   ParentTrackingView,
   PreviewImportInput,
@@ -195,6 +201,11 @@ export interface TripDetail extends TripSummary {
   students: TripStudentView[];
   locationSessionEpoch: number;
   locationSourceDeviceId: string | null;
+  driverMembershipId: string | null;
+  attendantMembershipId: string | null;
+  driverName: string | null;
+  attendantName: string | null;
+  seatCount: number;
   live: {
     lat: number;
     lng: number;
@@ -442,7 +453,25 @@ export interface AdminPort extends RouteAdminPort {
   ): Promise<GenerateHorizonResult>;
   listTripsForDate(tenantId: string, actor: TripActor, date: string): Promise<TripSummary[]>;
   getTripDetail(tenantId: string, actor: TripActor, tripId: string): Promise<TripDetail | null>;
-  listEventsUnavailable(): { items: []; available: false };
+  assignTripVehicle(
+    tenantId: string,
+    actor: TripActor,
+    tripId: string,
+    input: AssignTripVehicleInput,
+  ): Promise<TripSummary>;
+  assignTripCrew(
+    tenantId: string,
+    actor: TripActor,
+    tripId: string,
+    input: AssignTripCrewInput,
+  ): Promise<TripSummary>;
+  transferStudent(
+    tenantId: string,
+    actor: TripActor,
+    input: CreateStudentTripMoveInput,
+  ): Promise<StudentTripMoveResult>;
+  listEvents(tenantId: string, membershipId: string, date: string): Promise<AdminEventsList>;
+  listPriorities(tenantId: string, membershipId: string, date: string): Promise<AdminPrioritiesList>;
   listExceptions(tenantId: string, membershipId: string): Promise<AdminExceptionsList>;
   approveDeliveryOverride(
     tenantId: string,

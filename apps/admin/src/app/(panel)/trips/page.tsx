@@ -24,9 +24,11 @@ export default function TripsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setError(null);
     void apiFetch<{ items: TripRow[] }>(`/v1/admin/trips?date=${date}`)
-      .then((body) => setItems(body.items))
+      .then((body) => {
+        setItems(body.items);
+        setError(null);
+      })
       .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : 'Okunamadı'));
   }, [date]);
 

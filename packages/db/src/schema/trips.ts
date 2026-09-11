@@ -231,7 +231,7 @@ export const tripStudent = pgTable(
     }),
     check(
       'temp_delivery_requires_verification',
-      sql`${t.state} not in ('DELIVERED', 'DELIVERED_LATE')
+      sql`${t.state} not in ('DELIVERED', 'DELIVERED_LATE', 'RETURNED_HOME')
         or ${t.deliveryTarget} <> 'TEMP'
         or (${t.deliveryMethod} in ('OTP', 'ADMIN_OVERRIDE') and ${t.deliveryVerifiedAt} is not null)`,
     ),
@@ -269,6 +269,9 @@ export const tripVehicleAssignment = pgTable(
       foreignColumns: [vehicle.tenantId, vehicle.id],
     }),
     tenantIsolation('trip_vehicle_assignment'),
+    index('trip_vehicle_assignment_open_idx')
+      .on(t.tenantId, t.tripId)
+      .where(sql`${t.validTo} is null`),
   ],
 ).enableRLS();
 
@@ -298,6 +301,9 @@ export const tripCrewAssignment = pgTable(
       foreignColumns: [tenantMembership.tenantId, tenantMembership.id],
     }),
     tenantIsolation('trip_crew_assignment'),
+    index('trip_crew_assignment_open_idx')
+      .on(t.tenantId, t.tripId, t.role)
+      .where(sql`${t.validTo} is null`),
   ],
 ).enableRLS();
 
