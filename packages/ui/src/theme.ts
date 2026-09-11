@@ -6,6 +6,10 @@ export const colors = {
   accent: '#38BDF8',
   danger: '#F43F5E',
   success: '#34D399',
+  asphalt: '#14120E',
+  paper: '#F4EFE4',
+  headlamp: '#F5C518',
+  steel: '#2A261F',
 } as const;
 
 export const space = {

@@ -8,7 +8,12 @@ const env = loadEnv();
 initObservability(env);
 
 const sql = createSql(env.DATABASE_URL, 'api');
-const data = createPostgresData(sql);
+const data = createPostgresData(sql, {
+  invitePepper: env.OTP_PEPPER,
+  otpEncryptionKey: env.OTP_ENCRYPTION_KEY,
+  publicAppUrl: env.ADMIN_PUBLIC_URL ?? '',
+  revealInviteSecrets: false,
+});
 
 const app = buildApp({
   env,

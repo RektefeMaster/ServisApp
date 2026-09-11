@@ -1,28 +1,36 @@
 import {
+  adminOverrideDeliveryInput,
   cloneRouteVersionInput,
+  commitImportInput,
   createGuardianInput,
+  createHolidayInput,
+  createInviteInput,
   createRouteInput,
   createSchoolInput,
   createStaffInput,
   createStopInput,
   createStudentInput,
   createVehicleInput,
+  changeUnactivatedPhoneInput,
+  endStudentInput,
+  listTripsQuery,
   pinAddressInput,
+  previewImportInput,
   replaceRouteStopsInput,
 } from '@servisapp/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { requireTenantId } from '../../auth/context.js';
 import type { AppData } from '../../data/ports.js';
-import { badRequest, notFound } from '../../http-error.js';
+import { badRequest, forbidden, notFound } from '../../http-error.js';
 
 const studentIdParams = z.object({ studentId: z.uuid() });
+const schoolIdParams = z.object({ schoolId: z.uuid() });
 const routeIdParams = z.object({ routeId: z.uuid() });
 const versionIdParams = z.object({ versionId: z.uuid() });
 
 function tenantIdOf(request: FastifyRequest): string {
-  const id = request.auth?.membership?.tenantId;
-  if (!id) throw badRequest('tenant_required', 'x-tenant-id zorunlu');
-  return id;
+  return requireTenantId(request.auth);
 }
 
 function parse<T>(schema: z.ZodType<T>, body: unknown): T {
@@ -134,5 +142,158 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
   app.post('/v1/admin/route-versions/:versionId/publish', async (request) => {
     const params = parse(versionIdParams, request.params);
     return data.admin.publishRouteVersion(tenantIdOf(request), params.versionId);
+  });
+
+  app.post('/v1/admin/schools/:schoolId/calendar-days', async (request) => {
+    const params = parse(schoolIdParams, request.params);
+    const input = parse(createHolidayInput, request.body);
+    return data.admin.createHoliday(tenantIdOf(request), params.schoolId, input);
+  });
+
+  app.get('/v1/admin/staff', async (request) => {
+    return { items: await data.admin.listStaff(tenantIdOf(request)) };
+  });
+
+  app.get('/v1/admin/students/:studentId', async (request) => {
+    const params = parse(studentIdParams, request.params);
+    const item = await data.admin.getStudent(tenantIdOf(request), params.studentId);
+    if (!item) throw notFound('Öğrenci bulunamadı');
+    return item;
+  });
+
+  app.post('/v1/admin/students/:studentId/end', async (request) => {
+    const params = parse(studentIdParams, request.params);
+    const input = parse(endStudentInput, request.body);
+    return data.admin.endStudent(tenantIdOf(request), params.studentId, input.enrollmentEnd);
+  });
+
+  app.post('/v1/admin/students/:studentId/guardians/:membershipId/revoke', async (request) => {
+    const params = parse(
+      z.object({ studentId: z.uuid(), membershipId: z.uuid() }),
+      request.params,
+    );
+    return data.admin.revokeGuardian(tenantIdOf(request), params.studentId, params.membershipId);
+  });
+
+  app.post('/v1/admin/identities/:identityId/phone', async (request) => {
+    const params = parse(z.object({ identityId: z.uuid() }), request.params);
+    const input = parse(changeUnactivatedPhoneInput, request.body);
+    return data.admin.changeUnactivatedPhone(tenantIdOf(request), params.identityId, input.phone);
+  });
+
+  app.post('/v1/admin/imports/preview', async (request) => {
+    const input = parse(previewImportInput, request.body);
+    const membershipId = request.auth?.membership?.membershipId ?? '';
+    return data.admin.previewImport(tenantIdOf(request), membershipId, input);
+  });
+
+  app.get('/v1/admin/imports/:batchId', async (request) => {
+    const params = parse(z.object({ batchId: z.uuid() }), request.params);
+    const batch = await data.admin.getImport(tenantIdOf(request), params.batchId);
+    if (!batch) throw notFound('İçe aktarma bulunamadı');
+    return batch;
+  });
+
+  app.post('/v1/admin/imports/:batchId/commit', async (request) => {
+    const params = parse(z.object({ batchId: z.uuid() }), request.params);
+    const input = parse(commitImportInput, request.body ?? {});
+    return data.admin.commitImport(tenantIdOf(request), params.batchId, input);
+  });
+
+  app.post('/v1/admin/invites', async (request) => {
+    const input = parse(createInviteInput, request.body);
+    const actorId = request.auth?.membership?.membershipId ?? '';
+    return data.admin.createInvite(tenantIdOf(request), actorId, input.membershipId);
+  });
+
+  app.post('/v1/admin/invites/:inviteId/sms', async (request) => {
+    const params = parse(z.object({ inviteId: z.uuid() }), request.params);
+    return data.admin.sendInviteSms(tenantIdOf(request), params.inviteId);
+  });
+
+  app.get('/v1/admin/trips', async (request) => {
+    const query = parse(listTripsQuery, request.query);
+    const membership = request.auth?.membership;
+    if (!membership) throw notFound('Sefer bulunamadı');
+    return {
+      items: await data.admin.listTripsForDate(
+        tenantIdOf(request),
+        {
+          membershipId: membership.membershipId,
+          roles: membership.roles,
+          deviceId: null,
+          platform: 'ANDROID',
+          appVersion: null,
+        },
+        query.date,
+      ),
+    };
+  });
+
+  app.get('/v1/admin/trips/:tripId', async (request) => {
+    const params = parse(z.object({ tripId: z.uuid() }), request.params);
+    const membership = request.auth?.membership;
+    if (!membership) throw notFound('Sefer bulunamadı');
+    const detail = await data.admin.getTripDetail(
+      tenantIdOf(request),
+      {
+        membershipId: membership.membershipId,
+        roles: membership.roles,
+        deviceId: null,
+        platform: 'ANDROID',
+        appVersion: null,
+      },
+      params.tripId,
+    );
+    if (!detail) throw notFound('Sefer bulunamadı');
+    return detail;
+  });
+
+  app.get('/v1/admin/events', () => data.admin.listEventsUnavailable());
+  app.get('/v1/admin/exceptions', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    return data.admin.listExceptions(tenantIdOf(request), membershipId);
+  });
+
+  app.post('/v1/admin/delivery-overrides/:overrideId/approve', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    const params = parse(z.object({ overrideId: z.uuid() }), request.params);
+    return data.admin.approveDeliveryOverride(tenantIdOf(request), membershipId, params.overrideId);
+  });
+
+  app.post('/v1/admin/delivery-overrides/:overrideId/reject', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    const params = parse(z.object({ overrideId: z.uuid() }), request.params);
+    return data.admin.rejectDeliveryOverride(tenantIdOf(request), membershipId, params.overrideId);
+  });
+
+  app.post('/v1/admin/delivery-overrides/:overrideId/admin-verify', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    const params = parse(z.object({ overrideId: z.uuid() }), request.params);
+    const input = parse(adminOverrideDeliveryInput, request.body);
+    return data.admin.adminOverrideDelivery(
+      tenantIdOf(request),
+      membershipId,
+      params.overrideId,
+      input,
+    );
+  });
+
+  app.post('/v1/admin/address-changes/:requestId/approve', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    const params = parse(z.object({ requestId: z.uuid() }), request.params);
+    return data.admin.approveAddressChange(tenantIdOf(request), membershipId, params.requestId);
+  });
+
+  app.post('/v1/admin/address-changes/:requestId/reject', async (request) => {
+    const membershipId = request.auth?.membership?.membershipId;
+    if (!membershipId) throw forbidden();
+    const params = parse(z.object({ requestId: z.uuid() }), request.params);
+    return data.admin.rejectAddressChange(tenantIdOf(request), membershipId, params.requestId);
   });
 }

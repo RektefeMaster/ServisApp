@@ -34,6 +34,38 @@ const schema = z.object({
     (value) => (value === '' || value === undefined ? undefined : value),
     z.string().optional(),
   ),
+  ADMIN_PUBLIC_URL: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.url().optional(),
+  ),
+  // Yalnız yerel Expo: personel uygulaması hosted Auth olmadan e-posta + bu parola ile girer.
+  DEV_LOGIN_PASSWORD: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.string().min(16).optional(),
+  ),
+  GOOGLE_MAPS_API_KEY: z.preprocess(
+    (value) => (value === '' || value === undefined ? undefined : value),
+    z.string().min(8).optional(),
+  ),
+  /**
+   * Güvenilen vekil IP/CIDR listesi. `true`, `1` ve hop-count (sayı) reddedilir:
+   * Fastify CVE-2026-16732 hop-count XFF sahteciliğine izin verir.
+   */
+  TRUST_PROXY: z.preprocess((value) => {
+    if (value === '' || value === undefined) return undefined;
+    const trimmed = String(value).trim();
+    if (
+      trimmed.length === 0 ||
+      trimmed === 'true' ||
+      trimmed === 'false' ||
+      trimmed === '1' ||
+      trimmed === '0' ||
+      /^\d+$/.test(trimmed)
+    ) {
+      return undefined;
+    }
+    return trimmed;
+  }, z.string().optional()),
 });
 
 export type Env = z.infer<typeof schema>;

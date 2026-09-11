@@ -7,8 +7,11 @@ import type { Env } from './env.js';
 import { HttpError } from './http-error.js';
 import { registerAdminRoutes } from './modules/admin/routes.js';
 import { registerConfigRoutes } from './modules/config/routes.js';
+import { registerDevRoutes } from './modules/dev/routes.js';
 import { registerHealthRoutes, type HealthDeps } from './modules/health/routes.js';
+import { registerParentRoutes } from './modules/parent/routes.js';
 import { registerSessionRoutes } from './modules/session/routes.js';
+import { registerTripAdminRoutes, registerTripRoutes } from './modules/trips/routes.js';
 import { Sentry } from './observability.js';
 import { registerAuth } from './plugins/auth.js';
 import { generateRequestId, registerRequestContext } from './plugins/request-context.js';
@@ -31,26 +34,53 @@ function adminCorsOrigin(origins: string | undefined): boolean | string | string
   return list;
 }
 
+function redactRequestUrl(url: string): string {
+  return url.replace(/\/v1\/invites\/[^/?#]+/gi, '/v1/invites/[redacted]');
+}
+
 export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
   const app = Fastify({
     genReqId: generateRequestId,
     logger: {
       level: env.LOG_LEVEL,
-      // Kişisel veri log'a düşmez: telefon, adres, OTP, push token.
+      // Kişisel veri log'a düşmez: telefon, adres, OTP, push token, davet token.
       redact: {
         paths: [
           'req.headers.authorization',
           'req.headers.cookie',
           '*.otp',
+          '*.otpCode',
           '*.password',
           '*.phone',
           '*.pushToken',
+          '*.token',
+          '*.inviteUrl',
         ],
         censor: '[gizlendi]',
       },
+      serializers: {
+        req(request) {
+          const url = 'url' in request && typeof request.url === 'string' ? request.url : '';
+          const method =
+            'method' in request && typeof request.method === 'string' ? request.method : undefined;
+          const host =
+            'hostname' in request && typeof request.hostname === 'string'
+              ? request.hostname
+              : undefined;
+          const ip = 'ip' in request && typeof request.ip === 'string' ? request.ip : undefined;
+          return {
+            method,
+            url: redactRequestUrl(url),
+            host,
+            remoteAddress: ip,
+          };
+        },
+      },
       ...(env.NODE_ENV === 'development' ? { transport: { target: 'pino-pretty' } } : {}),
     },
-    trustProxy: true,
+    // Varsayılan false: X-Forwarded-For sahteciliği rate-limit'i aşamaz.
+    // TRUST_PROXY yalnız IP/CIDR (asla true veya hop-count).
+    trustProxy: env.TRUST_PROXY ?? false,
     bodyLimit: 1_048_576,
   });
 
@@ -67,6 +97,7 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
       'x-tenant-id',
       'x-app-version',
       'x-device-id',
+      'x-device-platform',
       'x-request-id',
     ],
     maxAge: 86_400,
@@ -74,11 +105,21 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
   void app.register(rateLimit, {
     max: 300,
     timeWindow: '1 minute',
-    // Cihaz başına sınır: tünelden çıkan 100 aracın aynı anda senkronu
-    // tek bir IP arkasından gelebilir (SPEC §13 "thundering herd").
     keyGenerator: (request) => {
+      const path = request.url.split('?')[0] ?? request.url;
+      if (
+        path === '/v1/config' ||
+        path === '/v1/dev/login' ||
+        path === '/v1/dev/parent-login' ||
+        /^\/v1\/invites\/[^/]+$/.test(path)
+      ) {
+        return `ip:${request.ip ?? 'unknown'}`;
+      }
+      const identityId = request.auth?.identityId;
+      if (identityId) return `id:${identityId}`;
       const device = request.headers['x-device-id'];
-      return typeof device === 'string' ? device : (request.ip ?? 'unknown');
+      if (typeof device === 'string' && device.length > 0) return `d:${device}`;
+      return `ip:${request.ip ?? 'unknown'}`;
     },
   });
 
@@ -88,6 +129,7 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
         error: error.code,
         message: error.message,
         requestId: request.id,
+        ...(error.details === undefined ? {} : { details: error.details }),
       });
     }
     const status = error.statusCode ?? 500;
@@ -109,8 +151,12 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
   registerHealthRoutes(app, health);
   if (data) {
     registerConfigRoutes(app, data);
+    registerDevRoutes(app, env, data);
     registerSessionRoutes(app);
     registerAdminRoutes(app, data);
+    registerParentRoutes(app, data);
+    registerTripAdminRoutes(app, data);
+    registerTripRoutes(app, data);
   }
 
   return app;

@@ -112,3 +112,18 @@ export const membershipStatusEnum = pgEnum('membership_status', [
 ]);
 export const devicePlatformEnum = pgEnum('device_platform', ['IOS', 'ANDROID']);
 export const alertSeverityEnum = pgEnum('alert_severity', ['INFO', 'WARNING', 'CRITICAL']);
+export const guardianRelationStatusEnum = pgEnum('guardian_relation_status', ['ACTIVE', 'REVOKED']);
+export const importRowStatusEnum = pgEnum('import_row_status', [
+  'PENDING',
+  'READY',
+  'NEEDS_FIX',
+  'ADDRESS_UNVERIFIED',
+  'COMMITTED',
+  'FAILED',
+]);
+export const inviteStatusEnum = pgEnum('invite_status', [
+  'PENDING',
+  'USED',
+  'EXPIRED',
+  'REVOKED',
+]);

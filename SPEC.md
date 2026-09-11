@@ -1,4 +1,4 @@
-# ServisApp V1 — Implementation Spec (rev. 3.2)
+# ServisApp V1 — Implementation Spec (rev. 3.3)
 
 ## Context
 
@@ -6,13 +6,14 @@ Servis şirketinin sabah/akşam öğrenci taşıma operasyonu bugün Excel + Wha
 
 Bu ilk ciddi satış. Plan iki şeyi aynı anda tutuyor: **V1 kapsamı dar** (satışı kapatan çekirdek), **çekirdeğin altyapısı sağlam** (durum makinesi, idempotency, olay kaydı, kiracı izolasyonu). Ölçek hedefi 4.000 öğrenci; mimari 40.000'de değişmeyecek, mikroservise gerek yok. Repo şu an boş (`.git` var, tek commit yok).
 
-**Bu revizyondan sonra spec'e yeni özellik eklenmeyecek.** Bundan sonraki en değerli iş spec büyütmek değil, Faz 0→1'i kusursuz kurmak.
+**rev. 3.3 özellikleri şişirmez; kayıt, davet ve erişim sözleşmesini kilitler.** Bundan sonraki en değerli iş spec büyütmek değil, bu sözleşmeyi uygulamaktır.
 
 ### Düzeltme geçmişi (özet)
 
 **rev. 2:** Android arka plan konumunda "asla gerekmez" iddiası kaldırıldı · çapraz tablo CHECK imkânsızlığı · `client_event_id` yalnız replay çözer · domain paketi mobilde yetki kaynağı değil · Route Matrix element başına faturalanıyor · V1 kapsamı daraltıldı.
 **rev. 3:** Periyodik Routes çağrısı tamamen kaldırıldı → event-driven · konum ile ETA kesin ayrıldı · smooth marker interpolation · GPS kalite filtresi + `eta_confidence` + `route_segment_stat` · maliyet hedefi doğruluk pahasına elde edilmeyecek.
 **rev. 3.1:** `otp_hmac` + `otp_ciphertext` ayrımı · baseline chunking · `command_receipt` · tenant_id + bileşik FK standardı · broadcast veli sayısıyla çarpılmıyor · Expo SDK 57 / RN 0.86.3.
+**rev. 3.3:** Yönetici kaydı / veli aktivasyonu / `student_guardian` erişimi kilidi. Özellik yığını değil.
 
 ### rev. 3.2 — zorunlu düzeltmeler
 
@@ -37,6 +38,38 @@ Bu ilk ciddi satış. Plan iki şeyi aynı anda tutuyor: **V1 kapsamı dar** (sa
 | 14  | `device_seq` katı sıra şartı kuyruğu sonsuza kilitleyebilir → sıra yalnız **batch içi**; correctness her zaman CAS                                                                                         |
 | 15  | Undo tombstone'unu saklayacak tablo yoktu → `pending_command_dependency` + `expires_at`                                                                                                                    |
 | 16  | Araç konumunun hangi cihazdan geldiği belirsizdi (iki telefon = zıplayan marker) → `location_source_device_id` + `location_session_epoch`                                                                  |
+
+### rev. 3.3 — kayıt, davet, erişim (kilit)
+
+Bu revizyon yeni ürün katmanı eklemez. Admin veriyi kurar, rota operasyonu belirler, veli yalnız aktive olur, günlük değişiklik exception motorundan geçer. Identity sökülmez; öğrenci araca değil rotaya yazılır; davet linki yetki değil onboarding başlangıcıdır.
+
+**Erişim (tek cümle, server-side zorunlu):** `tenant_membership ACTIVE` yalnız tenant erişimi sağlar; bir öğrencinin okunabilmesi için aynı tenant altında aktif `student_guardian` ilişkisi zorunludur. UI gizlemesi güvenlik değildir. `auth_user_id` bağlama personel/yönetici için telefon (JWT `phone`) iledir; veli yalnız davet aktivasyonunda bağlanır; doğrulanmış e-posta tek başına kimliği ele geçirmez.
+
+Personel uygulaması bu sözleşmenin parçası değildir. Şoför/hostes e-posta + `GET /v1/session` + `trip_crew_assignment` ile girer; SMS/davet/Universal Link crew'da yoktur ve V1'de eklenmez.
+
+| #   | Kilit | Sözleşme |
+| --- | ----- | -------- |
+| 17  | Üyelik ≠ çocuk | Çocuk listesi yalnız `student_guardian.status = ACTIVE` + `tenant_membership ACTIVE`. `resolve_session` yalnız personel/yönetici (ADMIN/DRIVER/ATTENDANT) telefonla bağlar ve INVITED→ACTIVE eder; GUARDIAN-only üyelik davet aktivasyonuna kadar INVITED ve `auth_user_id` boş kalır |
+| 18  | Import staging domain değil | `import_batch` / `import_batch_row` operasyon kaydıdır. Commit edilmemiş Excel `student`/`identity`/`trip` yazmaz. Satır satır `COMMITTED`/`FAILED`; giant transaction yok. `importBatchId` (+ dosya hash) idempotent |
+| 19  | Telefon kişi anahtarı değil | Normalize telefon eşleşme sinyalidir. Otomatik merge yok. Aynı isim+telefon+ikinci çocuk: bilinçli reuse, yeni davet yok. `identity.phone_e164 UNIQUE` Auth lookup içindir, merge lisansı değildir; V1'de düşürülmez |
+| 20  | Davet kişi/üyelik | `guardian_invite` bağlanır: `tenant_id + identity_id + tenant_membership_id`. `studentId` taşımaz. Aktivasyondan sonra çocuklar aktif `student_guardian`'dan okunur |
+| 21  | Davet ≠ SMS teslim | Invite: `PENDING → USED \| EXPIRED \| REVOKED`. SMS: `QUEUED → SENT → DELIVERED \| FAILED` |
+| 22  | Segment plan durumu | Veli API `morningPlanStatus` / `eveningPlanStatus`: `PREPARING \| READY \| NO_SERVICE \| SUSPENDED`. UI tahmin etmez. Davet SMS'i rota yayınından bağımsızdır |
+| 23  | Yayın ≠ sefer READY | Yayın: boş olmayan rota, aktif öğrenci stop'u, stop koordinatı, geçerli okul/adres, doğru segment. Araç/şoför/hostes eksiği yayını değil sefer `READY` geçişini bloklar |
+
+**Lifecycle (karıştırılmaz):**
+
+```
+Student          ACTIVE → ENDED          (enrollment_end NULL = ACTIVE)
+StudentGuardian  ACTIVE → REVOKED        (unique çift kalır; yeniden bağlama aynı satır)
+Membership       INVITED → ACTIVE → SUSPENDED | REVOKED
+Invite           PENDING → USED | EXPIRED | REVOKED
+SMS              QUEUED → SENT → DELIVERED | FAILED
+```
+
+Normal durumlar: üyelik ACTIVE + davet USED; üyelik açık + çocuk ilişkisi REVOKED; davet PENDING + SMS FAILED.
+
+Aktive olmuş (`auth_user_id` dolu) telefonda kör `identity.phone` güncellemesi yok; V1'de yalnız admin destek akışı.
 
 **Ayrıca eklenenler (ucuzken):** minimum desteklenen app sürümü (`426 Upgrade Required`) · sunucu tarafı feature flag'ler · GPS/OTP/realtime için ayrı kill switch · **restore testi** (yedeğin var olması ile geri yükleyebilmek aynı şey değil) · structured log + Sentry/OTel (`request_id` + `command_id` + `trip_id` + `tenant_id`).
 
@@ -218,6 +251,8 @@ Supabase auth.users → identity → tenant_membership → membership_role
 
 Diğer tüm tablolar kullanıcıya `membership_id` ile bağlanır (`student_guardian.guardian_membership_id`, `trip_crew_assignment.membership_id`, …). Bunu sonradan eklemek can sıkıcı bir migration; şimdi bedava.
 
+`identity.phone_e164` Auth/OTP lookup için UNIQUE kalır; bu otomatik kişi birleştirme lisansı değildir. Tenant veya `student_guardian` üzerine telefon UNIQUE eklenmez.
+
 ### Kalıcı
 
 ```
@@ -233,9 +268,18 @@ stop(id, tenant_id, address_id, lat, lng, label)    -- aracın durduğu nokta �
 student(id, tenant_id, school_id, full_name, grade, photo_path,
         handover_policy[GUARDIAN_REQUIRED|MAY_LEAVE_ALONE], enrollment_start, enrollment_end)
 student_guardian(student_id, guardian_membership_id, relation, is_primary,
+        status[ACTIVE|REVOKED],
         can_receive_child, can_authorize_temp_address, can_submit_exception,
         notify_am, notify_pm)
 student_address(student_id, address_id, usage[PICKUP|DROPOFF], valid_from, valid_to)
+student.uses_morning / uses_evening  -- bilinçli NO_SERVICE; Excel metni koordinat değildir
+
+import_batch(id, tenant_id, file_hash, file_name, created_by_membership_id)
+import_batch_row(batch_id, row_no, raw jsonb, status[PENDING|READY|NEEDS_FIX|ADDRESS_UNVERIFIED|COMMITTED|FAILED],
+        error_code, student_id, identity_id)  -- domain tablosu değil
+guardian_invite(tenant_id, identity_id, membership_id, token_hash,
+        status[PENDING|USED|EXPIRED|REVOKED], expires_at)  -- student_id YOK
+invite_sms(invite_id, status[QUEUED|SENT|DELIVERED|FAILED], provider)
 
 route(id, tenant_id, vehicle_id, school_id, segment[MORNING|AFTERNOON], shift_no, max_detour_m)
   UNIQUE(tenant_id, vehicle_id, segment, shift_no)             -- ikili eğitim
@@ -668,7 +712,7 @@ Kod tek kullanımlık; sefer sonunda ve gün bitiminde geçersiz (ciphertext de 
 
 **Personel:** Sürüş sırasında ekranda üç bilgi — **sıradaki öğrenci kim, nereye gidiyorum, durum ne.** Bugünkü seferler · Sefer ekranı (fotoğraflı kart, büyük Bindi/Binmedi) · Öğrenci/durak listesi · Navigasyonu başlat · Teslim doğrulama · Sorun bildir · **Sefer öncesi/sonrası araç kontrolü**. Kritik değişiklik uyarısı onaylanana kadar ekranda kalır. Şoför öğrencinin "hayat hikâyesini" görmez: ad, fotoğraf, durak, teslim bilgisi, bir veli telefonu.
 
-**Yönetici:** Dashboard (öncelikli olaylar üstte) · Okullar · Öğrenciler · Veliler · Araçlar · Personel · Rotalar (sürükle-bırak + harita) · Aktif seferler · İstisnalar · Olay kayıtları.
+**Yönetici:** Bugün · Seferler · Rotalar · Okullar · Öğrenciler (içe aktarma: hazır / düzeltilmeli / adres / benzersiz telefon = davet sayısı) · Filo · İstisnalar (API yoksa dürüst boş) · Olaylar (liste yoksa dürüst boş). Canlı konum yan menüde yoktur; GPS gelince Bugün → sefer detay → Canlı. Davet SMS'i rota yayınına bağlı değildir.
 
 ---
 

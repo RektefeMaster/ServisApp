@@ -6,7 +6,9 @@ const workspaceRoot = path.resolve(projectRoot, '../..');
 const config = getDefaultConfig(projectRoot);
 
 config.watchFolders = [workspaceRoot];
-config.resolver.disableHierarchicalLookup = true;
+// pnpm keeps RN deps like `invariant` next to react-native in .pnpm, not in
+// the project root. Hierarchical lookup is required to find them.
+config.resolver.unstable_enableSymlinks = true;
 config.resolver.nodeModulesPaths = [
   path.resolve(projectRoot, 'node_modules'),
   path.resolve(workspaceRoot, 'node_modules'),

@@ -20,6 +20,7 @@ import {
   addressUsageEnum,
   calendarDayTypeEnum,
   crewRoleEnum,
+  guardianRelationStatusEnum,
   handoverPolicyEnum,
   routeVersionStatusEnum,
   schoolLevelEnum,
@@ -166,6 +167,9 @@ export const student = pgTable(
     handoverPolicy: handoverPolicyEnum('handover_policy').notNull(),
     enrollmentStart: date('enrollment_start').notNull(),
     enrollmentEnd: date('enrollment_end'),
+    usesMorning: boolean('uses_morning').notNull().default(true),
+    usesEvening: boolean('uses_evening').notNull().default(true),
+    suspended: boolean('suspended').notNull().default(false),
   },
   (t) => [
     tenantRowUnique('student', t.tenantId, t.id),
@@ -194,9 +198,13 @@ export const studentGuardian = pgTable(
     canSubmitException: boolean('can_submit_exception').notNull().default(true),
     notifyAm: boolean('notify_am').notNull().default(true),
     notifyPm: boolean('notify_pm').notNull().default(true),
+    status: guardianRelationStatusEnum('status').notNull().default('ACTIVE'),
   },
   (t) => [
     unique('student_guardian_pair').on(t.tenantId, t.studentId, t.guardianMembershipId),
+    index('student_guardian_membership_idx')
+      .on(t.tenantId, t.guardianMembershipId)
+      .where(sql`${t.status} = 'ACTIVE'`),
     foreignKey({
       name: 'student_guardian_student_fk',
       columns: [t.tenantId, t.studentId],

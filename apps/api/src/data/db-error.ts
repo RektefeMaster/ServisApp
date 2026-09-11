@@ -1,4 +1,4 @@
-import { badRequest, conflict, HttpError } from '../http-error.js';
+import { badRequest, conflict, HttpError, notFound } from '../http-error.js';
 
 export function mapDbError(error: unknown): never {
   if (error instanceof HttpError) throw error;
@@ -6,6 +6,33 @@ export function mapDbError(error: unknown): never {
   const message = errorMessage(error);
   if (message.includes('identity_not_provisioned')) {
     throw new HttpError(403, 'identity_not_provisioned', 'Bu hesap henüz tanımlanmamış');
+  }
+  if (message.includes('delivery_otp_not_verified')) {
+    throw new HttpError(403, 'delivery_otp_not_verified', 'OTP doğrulanmadan teslim işaretlenemez');
+  }
+  if (message.includes('admin_override_forbidden')) {
+    throw new HttpError(403, 'admin_override_forbidden', 'Teslim iptali yalnız yöneticidedir');
+  }
+  if (message.includes('delivery_override_not_found')) {
+    throw notFound('Teslim talebi bulunamadı');
+  }
+  if (message.includes('delivery_override_not_active')) {
+    throw conflict('override_not_active', 'Teslim talebi bu durumda onaylanamaz');
+  }
+  if (message.includes('delivery_override_expired')) {
+    throw conflict('otp_expired', 'Kodun süresi doldu');
+  }
+  if (message.includes('delivery_override_locked')) {
+    throw conflict('otp_locked', 'Kod kilitli; yönetici onayı gerekir');
+  }
+  if (message.includes('delivery_override_student_mismatch')) {
+    throw conflict('override_student_mismatch', 'Teslim talebi bu öğrenciye ait değil');
+  }
+  if (message.includes('delivery_override_not_temp')) {
+    throw conflict('override_not_temp', 'Bu öğrenci farklı teslimatta değil');
+  }
+  if (message.includes('admin_override_reason_required')) {
+    throw badRequest('invalid_body', 'Yönetici onay gerekçesi zorunlu');
   }
   if (message.includes('identity_auth_mismatch')) {
     throw conflict('identity_auth_mismatch', 'Kimlik başka bir hesaba bağlı');
@@ -38,6 +65,12 @@ export function mapDbError(error: unknown): never {
     if (constraint === 'route_stop_stop' || message.includes('route_stop_stop')) {
       throw badRequest('duplicate_stop', 'Aynı durak rotada iki kez olamaz');
     }
+    if (
+      constraint === 'guardian_invite_one_pending' ||
+      message.includes('guardian_invite_one_pending')
+    ) {
+      throw conflict('invite_pending', 'Bu üyelikte zaten bekleyen bir davet var');
+    }
     throw conflict('duplicate', 'Bu kayıt zaten var');
   }
   if (code === '23503') {
@@ -46,7 +79,28 @@ export function mapDbError(error: unknown): never {
   if (code === '23514') {
     throw badRequest('check_violation', 'Kayıt kurala uymuyor');
   }
+  if (message.includes('students_still_on_trip')) {
+    throw conflict('students_still_on_trip', 'Araçta öğrenci varken sefer kapanamaz');
+  }
+  if (message.includes('vehicle_sweep_not_confirmed')) {
+    throw conflict('vehicle_sweep_not_confirmed', 'Sefer sonu araç boş kontrolü yok');
+  }
+  if (message.includes('trip_not_active')) {
+    throw conflict('trip_not_active', 'Sefer aktif değil');
+  }
+  if (message.includes('trip_not_found') || message.includes('trip_student_not_found')) {
+    throw notFound();
+  }
+  if (message.includes('trip_stop_not_on_trip')) {
+    throw badRequest('invalid_reference', 'Durak bu sefere ait değil');
+  }
   throw error instanceof Error ? error : new Error(String(error));
+}
+
+export function isUniqueViolation(error: unknown, fragment: string): boolean {
+  if (pgCode(error) !== '23505') return false;
+  const constraint = pgConstraint(error) ?? '';
+  return constraint.includes(fragment) || errorMessage(error).includes(fragment);
 }
 
 function errorMessage(error: unknown): string {

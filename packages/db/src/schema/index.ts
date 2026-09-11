@@ -2,6 +2,7 @@ export * from './audit.js';
 export * from './enums.js';
 export * from './exceptions.js';
 export * from './identity.js';
+export * from './onboarding.js';
 export * from './overrides.js';
 export * from './persistent.js';
 export * from './platform.js';

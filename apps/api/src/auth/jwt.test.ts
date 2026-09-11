@@ -16,6 +16,10 @@ async function sign(claims: Record<string, unknown>, subValue = sub): Promise<st
     .sign(new TextEncoder().encode(secret));
 }
 
+async function hsInput(): Promise<{ secret: string; issuer: string; allowHs256: true }> {
+  return { secret, issuer, allowHs256: true };
+}
+
 describe('JWT doğrulama', () => {
   it('yalnız authenticated kullanıcı jetonunu kabul eder', async () => {
     const token = await sign({
@@ -24,7 +28,7 @@ describe('JWT doğrulama', () => {
       email: 'ayse@example.com',
       email_verified: true,
     });
-    await expect(verifyAccessToken(token, { secret, issuer })).resolves.toMatchObject({
+    await expect(verifyAccessToken(token, await hsInput())).resolves.toMatchObject({
       authUserId: sub,
       phone: '+905321234567',
       email: 'ayse@example.com',
@@ -33,7 +37,7 @@ describe('JWT doğrulama', () => {
 
   it('service_role jetonunu reddeder', async () => {
     const token = await sign({ role: 'service_role' });
-    await expect(verifyAccessToken(token, { secret, issuer })).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, await hsInput())).rejects.toMatchObject({
       statusCode: 401,
     });
   });
@@ -46,14 +50,14 @@ describe('JWT doğrulama', () => {
       .setAudience('authenticated')
       .setExpirationTime('1h')
       .sign(new TextEncoder().encode(secret));
-    await expect(verifyAccessToken(token, { secret, issuer })).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, await hsInput())).rejects.toMatchObject({
       statusCode: 401,
     });
   });
 
   it('UUID olmayan sub reddedilir', async () => {
     const token = await sign({ role: 'authenticated' }, 'not-a-uuid');
-    await expect(verifyAccessToken(token, { secret, issuer })).rejects.toMatchObject({
+    await expect(verifyAccessToken(token, await hsInput())).rejects.toMatchObject({
       statusCode: 401,
     });
   });
@@ -63,7 +67,7 @@ describe('JWT doğrulama', () => {
       role: 'authenticated',
       email: 'ayse@example.com',
     });
-    const claims = await verifyAccessToken(token, { secret, issuer });
+    const claims = await verifyAccessToken(token, await hsInput());
     expect(claims.email).toBeNull();
   });
 
@@ -73,7 +77,7 @@ describe('JWT doğrulama', () => {
       email: 'ayse@example.com',
       user_metadata: { email_verified: true },
     });
-    const claims = await verifyAccessToken(token, { secret, issuer });
+    const claims = await verifyAccessToken(token, await hsInput());
     expect(claims.email).toBeNull();
   });
 
@@ -82,13 +86,20 @@ describe('JWT doğrulama', () => {
       role: 'authenticated',
       phone: '905321234567',
     });
-    const claims = await verifyAccessToken(token, { secret, issuer });
+    const claims = await verifyAccessToken(token, await hsInput());
     expect(claims.phone).toBe('+905321234567');
   });
 
   it('HS256 jetonunu secret yokken reddeder', async () => {
     const token = await sign({ role: 'authenticated' });
     await expect(verifyAccessToken(token, { issuer })).rejects.toMatchObject({
+      statusCode: 401,
+    });
+  });
+
+  it('HS256 jetonunu allowHs256 kapalıyken secret varken de reddeder', async () => {
+    const token = await sign({ role: 'authenticated' });
+    await expect(verifyAccessToken(token, { secret, issuer })).rejects.toMatchObject({
       statusCode: 401,
     });
   });

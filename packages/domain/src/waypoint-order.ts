@@ -114,7 +114,6 @@ function twoOpt(
   let passes = 0;
   const maxPasses = Math.max(8, order.length * order.length);
   while (improved && passes < maxPasses) {
-    improved = false;
     passes += 1;
     improved = false;
     for (let i = 0; i < order.length - 1; i += 1) {

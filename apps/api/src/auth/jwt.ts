@@ -3,7 +3,8 @@ import { HttpError, unauthorized } from '../http-error.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const E164_RE = /^\+[1-9][0-9]{7,14}$/;
-const VERIFY_ALGS = ['HS256', 'ES256', 'RS256'] as const;
+const ASYMMETRIC_ALGS = ['ES256', 'RS256'] as const;
+const SYMMETRIC_ALGS = ['HS256'] as const;
 
 const remoteJwksByIssuer = new Map<string, JWTVerifyGetKey>();
 
@@ -15,10 +16,15 @@ export interface JwtClaims {
 
 export interface JwtVerifyInput {
   issuer: string;
-  /** Yalnız legacy HS256 (yerel test / eski JWT secret). Hosted ES256 için gerekmez. */
+  /** Yalnız yerel/test HS256. Üretimde asla verilmez. */
   secret?: string;
   /** Testlerde yerel JWKS; üretimde issuer üzerinden keşfedilir. */
   jwks?: JWTVerifyGetKey;
+  /**
+   * HS256 yalnız NODE_ENV !== production ve secret varken.
+   * Secret tanımlı olsa bile üretimde simetrik imza kabul edilmez.
+   */
+  allowHs256?: boolean;
 }
 
 export function supabaseIssuer(supabaseUrl: string): string {
@@ -33,11 +39,18 @@ function remoteJwks(issuer: string): JWTVerifyGetKey {
   return jwks;
 }
 
+function allowedAlgs(input: JwtVerifyInput): string[] {
+  if (input.allowHs256 && input.secret) {
+    return [...SYMMETRIC_ALGS, ...ASYMMETRIC_ALGS];
+  }
+  return [...ASYMMETRIC_ALGS];
+}
+
 function verifyKey(input: JwtVerifyInput): JWTVerifyGetKey {
   return async (header, token) => {
     const alg = header.alg;
     if (alg === 'HS256') {
-      if (!input.secret) {
+      if (!input.allowHs256 || !input.secret) {
         throw unauthorized('Geçersiz oturum');
       }
       return new TextEncoder().encode(input.secret);
@@ -53,7 +66,7 @@ function verifyKey(input: JwtVerifyInput): JWTVerifyGetKey {
 export async function verifyAccessToken(token: string, input: JwtVerifyInput): Promise<JwtClaims> {
   try {
     const { payload } = await jwtVerify(token, verifyKey(input), {
-      algorithms: [...VERIFY_ALGS],
+      algorithms: allowedAlgs(input),
       issuer: input.issuer,
       audience: 'authenticated',
       clockTolerance: 30,

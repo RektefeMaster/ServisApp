@@ -21,6 +21,7 @@ import {
   evaluateRouteCapacity,
   evaluateRoutePlan,
   exhaustive,
+  hasUsableCoordinates,
   suggestWaypointOrder,
   type RoutePlanIssue,
   type RoutePlanStop,
@@ -195,7 +196,7 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
       return withAdmin(db, tenantId, async (tx) => {
         const ctx = await requireDraft(tx, tenantId, versionId);
         assertReplacePayload(input);
-        await assertStopsAndStudents(tx, tenantId, ctx.schoolId, input);
+        await assertStopsAndStudents(tx, tenantId, ctx.schoolId, ctx.segment, input);
         await rewriteStops(tx, tenantId, versionId, input);
         const view = await loadVersionView(tx, tenantId, versionId);
         if (!view) throw new HttpError(500, 'insert_failed', 'Rota durakları okunamadı');
@@ -253,12 +254,22 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
           );
         }
 
+        await assertPublishGuards(tx, tenantId, view);
+
         await assertStudentsFreeForSegment(
           tx,
           tenantId,
           ctx.routeId,
           view.segment,
           view.stops.flatMap((item) => item.studentIds),
+        );
+
+        await tx.execute(
+          sql`select id from route_version
+              where route_id = ${ctx.routeId}::uuid
+                and tenant_id = ${tenantId}::uuid
+                and status in ('PUBLISHED', 'DRAFT')
+              for update`,
         );
 
         await tx
@@ -309,9 +320,7 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
           throw conflict('draft_exists', 'Bu rotada zaten bir taslak var');
         }
 
-        const published = [...versions]
-          .reverse()
-          .find((version) => version.status === 'PUBLISHED');
+        const published = [...versions].reverse().find((version) => version.status === 'PUBLISHED');
         const source =
           (input.fromVersionId
             ? versions.find((version) => version.id === input.fromVersionId)
@@ -418,6 +427,7 @@ async function assertStopsAndStudents(
   tx: Database,
   tenantId: string,
   schoolId: string,
+  segment: RouteSegment,
   input: ReplaceRouteStopsInput,
 ): Promise<void> {
   const stopIds = [...new Set(input.stops.map((item) => item.stopId))];
@@ -432,7 +442,13 @@ async function assertStopsAndStudents(
   const studentIds = [...new Set(input.stops.flatMap((item) => item.studentIds))];
   if (studentIds.length === 0) return;
   const foundStudents = await tx
-    .select({ id: student.id, schoolId: student.schoolId })
+    .select({
+      id: student.id,
+      schoolId: student.schoolId,
+      enrollmentEnd: student.enrollmentEnd,
+      usesMorning: student.usesMorning,
+      usesEvening: student.usesEvening,
+    })
     .from(student)
     .where(and(eq(student.tenantId, tenantId), inArray(student.id, studentIds)));
   if (foundStudents.length !== studentIds.length) {
@@ -440,6 +456,93 @@ async function assertStopsAndStudents(
   }
   if (foundStudents.some((item) => item.schoolId !== schoolId)) {
     throw badRequest('student_wrong_school', 'Öğrenci bu rotanın okuluna kayıtlı değil');
+  }
+  if (foundStudents.some((item) => item.enrollmentEnd)) {
+    throw badRequest('student_ended', 'Pasif öğrenci rotaya yazılmaz');
+  }
+  switch (segment) {
+    case 'MORNING':
+      if (foundStudents.some((item) => !item.usesMorning)) {
+        throw badRequest('student_segment_mismatch', 'Öğrenci bu segmentte servis kullanmıyor');
+      }
+      break;
+    case 'AFTERNOON':
+      if (foundStudents.some((item) => !item.usesEvening)) {
+        throw badRequest('student_segment_mismatch', 'Öğrenci bu segmentte servis kullanmıyor');
+      }
+      break;
+    default: {
+      const unexpected: never = segment;
+      void unexpected;
+      throw new Error('unknown segment');
+    }
+  }
+}
+
+async function assertPublishGuards(
+  tx: Database,
+  tenantId: string,
+  view: RouteVersionView,
+): Promise<void> {
+  if (view.stops.length === 0) {
+    throw badRequest('empty_route', 'Rotada durak yok');
+  }
+  const [schoolRow] = await tx
+    .select({
+      addressId: school.addressId,
+      lat: address.lat,
+      lng: address.lng,
+    })
+    .from(school)
+    .innerJoin(address, and(eq(address.id, school.addressId), eq(address.tenantId, tenantId)))
+    .where(and(eq(school.id, view.schoolId), eq(school.tenantId, tenantId)));
+  if (!schoolRow || !hasUsableCoordinates(schoolRow.lat, schoolRow.lng)) {
+    throw badRequest('invalid_school_address', 'Okul adresi geçersiz veya koordinatsız');
+  }
+  for (const stopRow of view.stops) {
+    if (!hasUsableCoordinates(stopRow.lat, stopRow.lng)) {
+      throw badRequest('missing_stop_coordinates', 'Durak koordinatı yok');
+    }
+  }
+  const studentIds = [...new Set(view.stops.flatMap((item) => item.studentIds))];
+  if (studentIds.length === 0) {
+    throw badRequest('need_passenger_stop', 'Okul dışında en az bir durak gerekli');
+  }
+  const enrolled = await tx
+    .select({
+      id: student.id,
+      enrollmentEnd: student.enrollmentEnd,
+      suspended: student.suspended,
+      usesMorning: student.usesMorning,
+      usesEvening: student.usesEvening,
+    })
+    .from(student)
+    .where(and(eq(student.tenantId, tenantId), inArray(student.id, studentIds)));
+  if (enrolled.length !== studentIds.length) {
+    throw badRequest('student_not_found', 'Rotadaki öğrenci bulunamadı');
+  }
+  if (enrolled.some((item) => item.enrollmentEnd)) {
+    throw badRequest('student_ended', 'Pasif öğrenci yayınlı rotada olamaz');
+  }
+  if (enrolled.some((item) => item.suspended)) {
+    throw badRequest('student_suspended', 'Askıdaki öğrenci yayınlı rotada olamaz');
+  }
+  switch (view.segment) {
+    case 'MORNING':
+      if (enrolled.some((item) => !item.usesMorning)) {
+        throw badRequest('student_segment_mismatch', 'Öğrenci bu segmentte servis kullanmıyor');
+      }
+      break;
+    case 'AFTERNOON':
+      if (enrolled.some((item) => !item.usesEvening)) {
+        throw badRequest('student_segment_mismatch', 'Öğrenci bu segmentte servis kullanmıyor');
+      }
+      break;
+    default: {
+      const unexpected: never = view.segment;
+      void unexpected;
+      throw new Error('unknown segment');
+    }
   }
 }
 
@@ -487,10 +590,7 @@ async function assertStudentsFreeForSegment(
       and(eq(routeStopStudent.tenantId, tenantId), inArray(routeStopStudent.studentId, unique)),
     );
   if (taken.length > 0) {
-    throw conflict(
-      'student_already_on_route',
-      'Öğrenci bu sefer türünde başka bir yayınlı rotada',
-    );
+    throw conflict('student_already_on_route', 'Öğrenci bu sefer türünde başka bir yayınlı rotada');
   }
 }
 

@@ -48,7 +48,7 @@ export const trip = pgTable(
     actualStartedAt: timestamp('actual_started_at', { withTimezone: true }),
     actualCompletedAt: timestamp('actual_completed_at', { withTimezone: true }),
     currentVehicleId: uuid('current_vehicle_id').notNull(),
-    currentDriverMembershipId: uuid('current_driver_membership_id').notNull(),
+    currentDriverMembershipId: uuid('current_driver_membership_id'),
     currentAttendantMembershipId: uuid('current_attendant_membership_id'),
     cancelReason: text('cancel_reason'),
     locationSourceDeviceId: uuid('location_source_device_id'),

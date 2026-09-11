@@ -7,9 +7,26 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "scheme": "servisapp-crew",
+    "plugins": [
+      "expo-task-manager",
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Sefer sırasında aracın konumunu velilere göstermek için konum gerekir.",
+          "locationAlwaysAndWhenInUsePermission": "Sefer arka plandayken konum göndermek için konum gerekir.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "app.servisapp.crew"
+      "bundleIdentifier": "app.servisapp.crew",
+      "infoPlist": {
+        "UIBackgroundModes": ["location"]
+      }
     },
     "android": {
       "package": "app.servisapp.crew",

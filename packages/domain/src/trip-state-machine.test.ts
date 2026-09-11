@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StudentState } from './states.js';
+import { occupiesVehicle } from './states.js';
 import { canTransitionTrip } from './trip-state-machine.js';
 
 const base = {
@@ -30,6 +31,14 @@ describe('sefer kapanışı — ürünün en önemli invariantı', () => {
         studentStates: ['DELIVERED', 'DELIVERY_FAILED'],
       }),
     ).toEqual({ ok: false, reason: 'STUDENTS_STILL_ON_TRIP' });
+  });
+
+  it('sefer sonu boş kontrolü yalnız araçtaki çocuk varken yalan olur', () => {
+    expect(occupiesVehicle('ON_BOARD')).toBe(true);
+    expect(occupiesVehicle('DELIVERY_FAILED')).toBe(true);
+    expect(occupiesVehicle('EXPECTED')).toBe(false);
+    expect(occupiesVehicle('NO_SHOW')).toBe(false);
+    expect(occupiesVehicle('DELIVERED')).toBe(false);
   });
 
   it('araç içi kontrol onaylanmadan sefer kapatılamaz', () => {

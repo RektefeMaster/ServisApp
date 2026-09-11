@@ -1,1 +1,24 @@
 @import 'tailwindcss';
+
+@theme {
+  --color-paper: #eef1ec;
+  --color-ink: #1b2a4a;
+  --color-rule: #c9d0c6;
+  --color-stripe: #d4a017;
+  --color-muted: #5c675e;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans), 'IBM Plex Sans', sans-serif;
+}
+
+.font-serif {
+  font-family: var(--font-serif), 'Source Serif 4', serif;
+}

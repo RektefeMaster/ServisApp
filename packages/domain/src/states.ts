@@ -65,8 +65,21 @@ export const OPERATIONAL_FACT_STATES = [
   'RETURNED_HOME',
 ] as const satisfies readonly StudentState[];
 
+/**
+ * Sefer sonu "araç boş" kontrolü bunlardan biri varken yalan olur.
+ * EXPECTED çocuğu araçta değildir; ON_BOARD / DELIVERY_FAILED çocuğu vardır.
+ */
+export const STATES_OCCUPYING_VEHICLE = [
+  'ON_BOARD',
+  'DELIVERY_FAILED',
+] as const satisfies readonly StudentState[];
+
 export function blocksCompletion(state: StudentState): boolean {
   return (STATES_BLOCKING_COMPLETION as readonly StudentState[]).includes(state);
+}
+
+export function occupiesVehicle(state: StudentState): boolean {
+  return (STATES_OCCUPYING_VEHICLE as readonly StudentState[]).includes(state);
 }
 
 export function isOperationalFact(state: StudentState): boolean {

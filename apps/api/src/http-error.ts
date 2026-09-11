@@ -1,12 +1,14 @@
 export class HttpError extends Error {
   readonly statusCode: number;
   readonly code: string;
+  readonly details: unknown;
 
-  constructor(statusCode: number, code: string, message: string) {
+  constructor(statusCode: number, code: string, message: string, details?: unknown) {
     super(message);
     this.name = 'HttpError';
     this.statusCode = statusCode;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -22,8 +24,12 @@ export function notFound(message = 'Kayıt bulunamadı'): HttpError {
   return new HttpError(404, 'not_found', message);
 }
 
-export function conflict(code: string, message: string): HttpError {
-  return new HttpError(409, code, message);
+export function gone(code: string, message: string): HttpError {
+  return new HttpError(410, code, message);
+}
+
+export function conflict(code: string, message: string, details?: unknown): HttpError {
+  return new HttpError(409, code, message, details);
 }
 
 export function upgradeRequired(minimum: string): HttpError {

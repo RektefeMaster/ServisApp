@@ -1,5 +1,6 @@
 import type {
   CreateGuardianInput,
+  CreateHolidayInput,
   CreateSchoolInput,
   CreateStaffInput,
   CreateStudentInput,
@@ -8,26 +9,40 @@ import type {
   PlatformConfig,
   SessionSnapshot,
 } from '@servisapp/contracts';
+import { hasUsableCoordinates, namesLikelySame } from '@servisapp/domain';
 import {
   address,
   createDbFromSql,
-  membershipRole,
   school,
+  schoolCalendarDay,
   staffAssignment,
   student,
   studentAddress,
-  studentGuardian,
   tenantMembership,
   vehicle,
   withTenant,
   type Database,
 } from '@servisapp/db';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import type postgres from 'postgres';
-import { conflict, HttpError } from '../http-error.js';
+import { HttpError } from '../http-error.js';
 import { mapDbError } from './db-error.js';
+import { attachMembership, ensureIdentityId, findIdentityByPhone, resolveGuardianIdentity } from './identity-write.js';
+import { createOnboarding, type OnboardingOptions, upsertGuardianLink } from './onboarding.js';
+import { loadParentChildren } from './plan-query.js';
+import type { AdminPort, AppData, SessionPort, TripPort } from './ports.js';
 import { createRouteAdminPort } from './route-admin.js';
-import type { AdminPort, AppData, RouteAdminPort, SessionPort } from './ports.js';
+import {
+  endStudentTx,
+  getStudentTx,
+  listStaffTx,
+  listStudentsTx,
+  revokeGuardianTx,
+} from './students-admin.js';
+import { MemoryRealtimeTransport } from '../realtime/memory.js';
+import { createTrackingPort } from './tracking.js';
+import { createTripPort } from './trips.js';
+import { createExceptionsPort } from './exceptions.js';
 
 interface SessionRow {
   identityId: string;
@@ -37,14 +52,183 @@ interface SessionRow {
   memberships: SessionSnapshot['memberships'];
 }
 
-type StaffOrGuardianRole = 'ADMIN' | 'DRIVER' | 'ATTENDANT' | 'GUARDIAN';
+interface DevLoginRow {
+  authUserId: string | null;
+  identityId: string;
+  fullName: string;
+  phone: string;
+  email: string;
+  hasCrewRole: boolean;
+}
 
-export function createPostgresData(sqlClient: postgres.Sql): AppData {
+interface DevParentRow {
+  authUserId: string | null;
+  identityId: string;
+  fullName: string;
+  phone: string;
+  email: string | null;
+}
+
+const TEST_INVITE_PEPPER = 'test-pepper-en-az-otuziki-karakterxxxx';
+const TEST_OTP_ENCRYPTION_KEY = 'test-key-en-az-otuziki-karakter-olmali-x';
+
+interface PostgresDataOptions extends Partial<OnboardingOptions> {
+  otpEncryptionKey?: string;
+}
+
+function resolveOnboardingOptions(options?: PostgresDataOptions): OnboardingOptions {
+  const invitePepper =
+    options?.invitePepper ??
+    process.env['OTP_PEPPER'] ??
+    (process.env['NODE_ENV'] === 'test' ? TEST_INVITE_PEPPER : '');
+  if (invitePepper.length < 32) {
+    throw new Error('OTP_PEPPER zorunlu (en az 32 karakter)');
+  }
+  return {
+    invitePepper,
+    publicAppUrl: (options?.publicAppUrl ?? process.env['ADMIN_PUBLIC_URL'] ?? '').replace(
+      /\/$/,
+      '',
+    ),
+    revealInviteSecrets: options?.revealInviteSecrets ?? false,
+  };
+}
+
+function resolveOtpEncryptionKey(options?: PostgresDataOptions): string {
+  const key =
+    options?.otpEncryptionKey ??
+    process.env['OTP_ENCRYPTION_KEY'] ??
+    (process.env['NODE_ENV'] === 'test' ? TEST_OTP_ENCRYPTION_KEY : '');
+  if (key.length < 32) {
+    throw new Error('OTP_ENCRYPTION_KEY zorunlu (en az 32 karakter)');
+  }
+  return key;
+}
+
+export function createPostgresData(
+  sqlClient: postgres.Sql,
+  options?: PostgresDataOptions,
+): AppData {
   const db = createDbFromSql(sqlClient);
+  const realtime = new MemoryRealtimeTransport();
+  const tracking = createTrackingPort(db, realtime);
+  const onboardingOptions = resolveOnboardingOptions(options);
+  const exceptions = createExceptionsPort(db, {
+    pepper: onboardingOptions.invitePepper,
+    encryptionKey: resolveOtpEncryptionKey(options),
+  });
+  const tripCore = createTripPort(db, {
+    onClosed: (tripId) => realtime.publishEnded(tripId),
+    ingest: (tenantId, actor, tripId, input) => tracking.ingest(tenantId, actor, tripId, input),
+  });
+  const trips: TripPort = {
+    ...tripCore,
+    verifyDeliveryOtp: (tenantId, actor, tripId, input) =>
+      exceptions.verifyDeliveryOtp(tenantId, actor, tripId, input),
+    ackCriticalChange: (tenantId, actor, tripId, alertId) =>
+      exceptions.ackCriticalChange(tenantId, actor, tripId, alertId),
+  };
+  const onboarding = createOnboarding(db, onboardingOptions);
+  const adminCore = createAdminPort(db);
   return {
     getPlatform: () => readPlatform(sqlClient),
     session: createSessionPort(sqlClient),
-    admin: { ...createAdminPort(db), ...createRouteAdminPort(db) },
+    trips,
+    parent: {
+      previewInvite: (token) => onboarding.previewInvite(token),
+      activateInvite: (token, auth) => onboarding.activateInvite(token, auth),
+      listChildren(tenantId, membershipId) {
+        return withAdmin(db, tenantId, membershipId, async (tx) => {
+          const [membership] = await tx
+            .select({ status: tenantMembership.status })
+            .from(tenantMembership)
+            .where(
+              and(eq(tenantMembership.id, membershipId), eq(tenantMembership.tenantId, tenantId)),
+            );
+          if (!membership) return [];
+          return loadParentChildren(tx, tenantId, membershipId, membership.status);
+        });
+      },
+      async getHome(tenantId, membershipId) {
+        const home = await tracking.homeForParent(tenantId, membershipId);
+        const plans = await exceptions.loadDayPlans(
+          tenantId,
+          membershipId,
+          home.children.map((child) => child.studentId),
+        );
+        return {
+          children: home.children.map((child) => ({
+            ...child,
+            day:
+              plans.get(child.studentId) ?? {
+                morningAbsent: false,
+                eveningAbsent: false,
+                morningExceptionId: null,
+                eveningExceptionId: null,
+                deliveryOverride: null,
+              },
+          })),
+        };
+      },
+      pollTracking(tenantId, membershipId, tripId, studentId) {
+        return tracking.pollForParent(tenantId, membershipId, tripId, studentId);
+      },
+      createRideException: (tenantId, membershipId, input) =>
+        exceptions.createRideException(tenantId, membershipId, input),
+      cancelRideException: (tenantId, membershipId, exceptionId) =>
+        exceptions.cancelRideException(tenantId, membershipId, exceptionId),
+      createDeliveryOverride: (tenantId, membershipId, input) =>
+        exceptions.createDeliveryOverride(tenantId, membershipId, input),
+      cancelDeliveryOverride: (tenantId, membershipId, overrideId) =>
+        exceptions.cancelDeliveryOverride(tenantId, membershipId, overrideId),
+      resendDeliveryOtp: (tenantId, membershipId, overrideId) =>
+        exceptions.resendDeliveryOtp(tenantId, membershipId, overrideId),
+      getParentDayPlan: (tenantId, membershipId, studentId, date) =>
+        exceptions.getParentDayPlan(tenantId, membershipId, studentId, date),
+      createAddressChange: (tenantId, membershipId, input) =>
+        exceptions.createAddressChange(tenantId, membershipId, input),
+    },
+    admin: {
+      ...adminCore,
+      ...createRouteAdminPort(db),
+      previewImport: (tenantId, actorMembershipId, input) =>
+        onboarding.previewImport(tenantId, actorMembershipId, input),
+      getImport: (tenantId, batchId) => onboarding.getImport(tenantId, batchId),
+      commitImport: (tenantId, batchId, input) =>
+        onboarding.commitImport(tenantId, batchId, input),
+      createInvite: (tenantId, actorMembershipId, membershipId) =>
+        onboarding.createInvite(tenantId, actorMembershipId, membershipId),
+      sendInviteSms: (tenantId, inviteId) => onboarding.sendInviteSms(tenantId, inviteId),
+      changeUnactivatedPhone: (tenantId, identityId, phone) =>
+        onboarding.changeUnactivatedPhone(tenantId, identityId, phone),
+      generateHorizon(tenantId, membershipId, input) {
+        return trips.generateHorizon(tenantId, { membershipId, role: 'ADMIN' }, input);
+      },
+      listTripsForDate(tenantId, actor, date) {
+        return trips.listForDate(tenantId, actor, date);
+      },
+      getTripDetail(tenantId, actor, tripId) {
+        return trips.getDetail(tenantId, actor, tripId);
+      },
+      listEventsUnavailable: () => ({ items: [], available: false as const }),
+      listExceptions: (tenantId, membershipId) =>
+        exceptions.listAdminExceptions(tenantId, membershipId),
+      approveDeliveryOverride: (tenantId, membershipId, overrideId) =>
+        exceptions.approveDeliveryOverride(tenantId, membershipId, overrideId),
+      rejectDeliveryOverride: (tenantId, membershipId, overrideId) =>
+        exceptions.rejectDeliveryOverride(tenantId, membershipId, overrideId),
+      adminOverrideDelivery: (tenantId, membershipId, overrideId, input) =>
+        exceptions.adminOverrideDelivery(tenantId, membershipId, overrideId, input),
+      approveAddressChange: (tenantId, membershipId, requestId) =>
+        exceptions.approveAddressChange(tenantId, membershipId, requestId),
+      rejectAddressChange: (tenantId, membershipId, requestId) =>
+        exceptions.rejectAddressChange(tenantId, membershipId, requestId),
+    },
+    realtime: {
+      vehicleBroadcasts: (tripId) => realtime.vehicleBroadcasts(tripId),
+      endedTripIds: () => realtime.endedTripIds(),
+      viewerCount: (tripId) => realtime.viewerCount(tripId),
+    },
   };
 }
 
@@ -100,6 +284,45 @@ function createSessionPort(sqlClient: postgres.Sql): SessionPort {
         mapDbError(error);
       }
     },
+
+    async findDevLoginIdentity(email) {
+      try {
+        const [row] = await sqlClient<{ identity: DevLoginRow | null }[]>`
+          select find_dev_login_identity(${email}) as identity
+        `;
+        const found = row?.identity;
+        if (!found) return null;
+        return {
+          authUserId: found.authUserId,
+          identityId: found.identityId,
+          fullName: found.fullName,
+          phone: found.phone,
+          email: found.email,
+          hasCrewRole: found.hasCrewRole,
+        };
+      } catch (error) {
+        mapDbError(error);
+      }
+    },
+
+    async findDevParentIdentity(phone) {
+      try {
+        const [row] = await sqlClient<{ identity: DevParentRow | null }[]>`
+          select find_dev_parent_identity(${phone}) as identity
+        `;
+        const found = row?.identity;
+        if (!found) return null;
+        return {
+          authUserId: found.authUserId,
+          identityId: found.identityId,
+          fullName: found.fullName,
+          phone: found.phone,
+          email: found.email,
+        };
+      } catch (error) {
+        mapDbError(error);
+      }
+    },
   };
 }
 
@@ -120,10 +343,32 @@ async function withAdmin<T>(
   }
 }
 
-function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
+type SetupAdmin = Pick<
+  AdminPort,
+  | 'pinAddress'
+  | 'listAddresses'
+  | 'createSchool'
+  | 'listSchools'
+  | 'createVehicle'
+  | 'listVehicles'
+  | 'createStaff'
+  | 'listStaff'
+  | 'createStudent'
+  | 'listStudents'
+  | 'getStudent'
+  | 'endStudent'
+  | 'createGuardian'
+  | 'revokeGuardian'
+  | 'createHoliday'
+>;
+
+function createAdminPort(db: Database): SetupAdmin {
   return {
-    pinAddress(tenantId, input: PinAddressInput) {
+    pinAddress(tenantId: string, input: PinAddressInput) {
       return withAdmin(db, tenantId, '', async (tx) => {
+        if (!hasUsableCoordinates(input.lat, input.lng)) {
+          throw new HttpError(400, 'invalid_coordinates', 'Pin için geçerli koordinat gerekli');
+        }
         const [row] = await tx
           .insert(address)
           .values({
@@ -138,6 +383,13 @@ function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
           })
           .returning({ id: address.id });
         if (!row) throw new HttpError(500, 'insert_failed', 'Adres kaydedilemedi');
+        if (input.studentId) {
+          await attachPinnedAddress(tx, tenantId, {
+            studentId: input.studentId,
+            addressId: row.id,
+            usage: input.usage,
+          });
+        }
         return row;
       });
     },
@@ -211,7 +463,15 @@ function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
 
     createStaff(tenantId, actorMembershipId, input: CreateStaffInput) {
       return withAdmin(db, tenantId, actorMembershipId, async (tx) => {
-        const identityId = await ensureIdentityId(tx, input.phone, input.email, input.fullName);
+        const existing = await findIdentityByPhone(tx, input.phone);
+        let identityId: string;
+        if (!existing) {
+          identityId = await ensureIdentityId(tx, input.phone, input.email, input.fullName);
+        } else if (namesLikelySame(existing.fullName, input.fullName)) {
+          identityId = existing.id;
+        } else {
+          throw new HttpError(409, 'phone_in_use', 'Bu telefon mevcut bir kişide kullanılıyor');
+        }
         const membershipId = await attachMembership(tx, tenantId, identityId, input.role);
 
         if (input.vehicleId && input.role !== 'ADMIN') {
@@ -220,12 +480,18 @@ function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
             vehicleId: input.vehicleId,
             membershipId,
             role: input.role,
-            validFrom: new Date(),
+            validFrom: input.validFrom
+              ? new Date(`${input.validFrom}T00:00:00.000Z`)
+              : new Date(),
           });
         }
 
         return { identityId, membershipId };
       });
+    },
+
+    listStaff(tenantId) {
+      return withAdmin(db, tenantId, '', (tx) => listStaffTx(tx, tenantId));
     },
 
     createStudent(tenantId, input: CreateStudentInput) {
@@ -239,6 +505,8 @@ function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
             grade: input.grade,
             handoverPolicy: input.handoverPolicy,
             enrollmentStart: input.enrollmentStart,
+            usesMorning: input.usesMorning,
+            usesEvening: input.usesEvening,
           })
           .returning({ id: student.id });
         if (!row) throw new HttpError(500, 'insert_failed', 'Öğrenci kaydedilemedi');
@@ -266,15 +534,15 @@ function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
     },
 
     listStudents(tenantId) {
-      return withAdmin(db, tenantId, '', async (tx) => {
-        return tx
-          .select({
-            id: student.id,
-            fullName: student.fullName,
-            schoolId: student.schoolId,
-          })
-          .from(student);
-      });
+      return withAdmin(db, tenantId, '', (tx) => listStudentsTx(tx, tenantId));
+    },
+
+    getStudent(tenantId, studentId) {
+      return withAdmin(db, tenantId, '', (tx) => getStudentTx(tx, tenantId, studentId));
+    },
+
+    endStudent(tenantId, studentId, enrollmentEnd) {
+      return withAdmin(db, tenantId, '', (tx) => endStudentTx(tx, tenantId, studentId, enrollmentEnd));
     },
 
     createGuardian(tenantId, studentId, input: CreateGuardianInput) {
@@ -285,13 +553,16 @@ function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
           .where(and(eq(student.id, studentId), eq(student.tenantId, tenantId)));
         if (!existing) throw new HttpError(404, 'not_found', 'Öğrenci bulunamadı');
 
-        const identityId = await ensureIdentityId(tx, input.phone, null, input.fullName);
+        const identityId = await resolveGuardianIdentity(tx, {
+          phone: input.phone,
+          fullName: input.fullName,
+          reuseIdentityId: input.reuseIdentityId,
+        });
         const membershipId = await attachMembership(tx, tenantId, identityId, 'GUARDIAN');
-
-        await tx.insert(studentGuardian).values({
+        await upsertGuardianLink(tx, {
           tenantId,
           studentId,
-          guardianMembershipId: membershipId,
+          membershipId,
           relation: input.relation,
           isPrimary: input.isPrimary,
           canReceiveChild: input.canReceiveChild,
@@ -304,88 +575,83 @@ function createAdminPort(db: Database): Omit<AdminPort, keyof RouteAdminPort> {
         return { identityId, membershipId };
       });
     },
+
+    revokeGuardian(tenantId, studentId, membershipId) {
+      return withAdmin(db, tenantId, '', (tx) =>
+        revokeGuardianTx(tx, tenantId, studentId, membershipId),
+      );
+    },
+
+    createHoliday(tenantId, schoolId, input: CreateHolidayInput) {
+      return withAdmin(db, tenantId, '', async (tx) => {
+        const [owned] = await tx
+          .select({ id: school.id })
+          .from(school)
+          .where(and(eq(school.id, schoolId), eq(school.tenantId, tenantId)));
+        if (!owned) throw new HttpError(404, 'not_found', 'Okul bulunamadı');
+        await tx
+          .insert(schoolCalendarDay)
+          .values({
+            tenantId,
+            schoolId,
+            date: input.date,
+            type: 'HOLIDAY',
+          })
+          .onConflictDoNothing({
+            target: [
+              schoolCalendarDay.tenantId,
+              schoolCalendarDay.schoolId,
+              schoolCalendarDay.date,
+            ],
+          });
+        return { schoolId, date: input.date, type: 'HOLIDAY' as const };
+      });
+    },
   };
 }
 
-async function ensureIdentityId(
-  tx: Database,
-  phone: string,
-  email: string | null,
-  fullName: string,
-): Promise<string> {
-  const result: unknown = await tx.execute(
-    sql`select ensure_identity(${phone}::text, ${email}::text, ${fullName}::text) as id`,
-  );
-  const id = scalarId(result);
-  if (!id) throw new HttpError(500, 'insert_failed', 'Kimlik kaydedilemedi');
-  return id;
-}
-
-function scalarId(result: unknown): string | undefined {
-  let rows: unknown;
-  if (Array.isArray(result)) {
-    rows = result;
-  } else if (isRecord(result) && 'rows' in result) {
-    rows = result['rows'];
-  } else {
-    return undefined;
-  }
-  if (!Array.isArray(rows) || rows.length === 0) return undefined;
-  const row: unknown = rows[0];
-  if (!isRecord(row)) return undefined;
-  const id = row['id'];
-  return typeof id === 'string' ? id : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-async function attachMembership(
+async function attachPinnedAddress(
   tx: Database,
   tenantId: string,
-  identityId: string,
-  role: StaffOrGuardianRole,
-): Promise<string> {
-  const [existing] = await tx
-    .select({
-      id: tenantMembership.id,
-      status: tenantMembership.status,
-    })
-    .from(tenantMembership)
-    .where(
-      and(eq(tenantMembership.tenantId, tenantId), eq(tenantMembership.identityId, identityId)),
-    );
+  input: { studentId: string; addressId: string; usage?: 'PICKUP' | 'DROPOFF' },
+): Promise<void> {
+  const [owned] = await tx
+    .select({ id: student.id })
+    .from(student)
+    .where(and(eq(student.id, input.studentId), eq(student.tenantId, tenantId)));
+  if (!owned) throw new HttpError(404, 'not_found', 'Öğrenci bulunamadı');
 
-  let membershipId: string;
-  if (existing) {
-    switch (existing.status) {
-      case 'ACTIVE':
-      case 'INVITED':
-        membershipId = existing.id;
-        break;
-      case 'SUSPENDED':
-      case 'REVOKED':
-        throw conflict('membership_inactive', 'Bu kişi bu şirkette durdurulmuş veya çıkarılmış');
-      default: {
-        const unexpected: never = existing.status;
-        void unexpected;
-        throw new Error('unknown membership status');
-      }
-    }
-  } else {
-    const [created] = await tx
-      .insert(tenantMembership)
-      .values({
-        tenantId,
-        identityId,
-        status: 'INVITED',
-      })
-      .returning({ id: tenantMembership.id });
-    if (!created) throw new HttpError(500, 'insert_failed', 'Üyelik kaydedilemedi');
-    membershipId = created.id;
+  const usages: Array<'PICKUP' | 'DROPOFF'> = input.usage ? [input.usage] : ['PICKUP', 'DROPOFF'];
+  const today = istanbulCalendarDate();
+  const yesterday = previousCalendarDate(today);
+  for (const usage of usages) {
+    await tx
+      .update(studentAddress)
+      .set({ validTo: yesterday })
+      .where(
+        and(
+          eq(studentAddress.tenantId, tenantId),
+          eq(studentAddress.studentId, input.studentId),
+          eq(studentAddress.usage, usage),
+          isNull(studentAddress.validTo),
+        ),
+      );
+    await tx.insert(studentAddress).values({
+      tenantId,
+      studentId: input.studentId,
+      addressId: input.addressId,
+      usage,
+      validFrom: today,
+    });
   }
+}
 
-  await tx.insert(membershipRole).values({ tenantId, membershipId, role }).onConflictDoNothing();
-  return membershipId;
+function istanbulCalendarDate(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
+}
+
+function previousCalendarDate(ymd: string): string {
+  const [year, month, day] = ymd.split('-').map(Number);
+  const utc = Date.UTC(year ?? 0, (month ?? 1) - 1, (day ?? 1) - 1);
+  return new Date(utc).toISOString().slice(0, 10);
 }

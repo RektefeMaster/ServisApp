@@ -48,6 +48,8 @@ export const pinAddressInput = z.object({
   lat: coordinate.shape.lat,
   lng: coordinate.shape.lng,
   geocodeConfidence: z.number().min(0).max(1).optional(),
+  studentId: uuid.optional(),
+  usage: z.enum(['PICKUP', 'DROPOFF']).optional(),
 });
 export type PinAddressInput = z.infer<typeof pinAddressInput>;
 
@@ -74,6 +76,7 @@ export const createStaffInput = z.object({
   email: z.string().email(),
   role: staffRole,
   vehicleId: uuid.optional(),
+  validFrom: z.iso.date().optional(),
 });
 export type CreateStaffInput = z.infer<typeof createStaffInput>;
 
@@ -83,6 +86,8 @@ export const createStudentInput = z.object({
   grade: z.string().trim().max(20).optional(),
   handoverPolicy: handoverPolicy,
   enrollmentStart: z.iso.date(),
+  usesMorning: z.boolean().default(true),
+  usesEvening: z.boolean().default(true),
   pickupAddressId: uuid.optional(),
   dropoffAddressId: uuid.optional(),
 });
@@ -98,5 +103,7 @@ export const createGuardianInput = z.object({
   canSubmitException: z.boolean().default(true),
   notifyAm: z.boolean().default(true),
   notifyPm: z.boolean().default(true),
+  /** Aynı telefon + farklı isimde zorunlu. Kör merge yok. */
+  reuseIdentityId: uuid.optional(),
 });
 export type CreateGuardianInput = z.infer<typeof createGuardianInput>;

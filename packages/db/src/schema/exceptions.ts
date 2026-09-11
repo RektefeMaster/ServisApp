@@ -20,7 +20,7 @@ import {
 import { tenantIsolation, tenantRowUnique } from './helpers.js';
 import { tenant, tenantMembership } from './identity.js';
 import { address, route, student } from './persistent.js';
-import { trip } from './trips.js';
+import { trip, tripStop } from './trips.js';
 
 export const rideException = pgTable(
   'ride_exception',
@@ -127,6 +127,7 @@ export const criticalChangeAlert = pgTable(
       .array()
       .notNull()
       .default(sql`'{}'::text[]`),
+    tripStopId: uuid('trip_stop_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -135,6 +136,11 @@ export const criticalChangeAlert = pgTable(
       name: 'critical_change_alert_trip_fk',
       columns: [t.tenantId, t.tripId],
       foreignColumns: [trip.tenantId, trip.id],
+    }),
+    foreignKey({
+      name: 'critical_change_alert_stop_fk',
+      columns: [t.tenantId, t.tripStopId],
+      foreignColumns: [tripStop.tenantId, tripStop.id],
     }),
     tenantIsolation('critical_change_alert'),
   ],

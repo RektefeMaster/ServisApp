@@ -19,6 +19,8 @@ try {
     await sql.begin(async (tx) => {
       const identity = '00000000-0000-4000-8000-000000000010';
       const membership = '00000000-0000-4000-8000-000000000011';
+      const adminIdentity = '00000000-0000-4000-8000-000000000012';
+      const adminMembership = '00000000-0000-4000-8000-000000000013';
       const address = '00000000-0000-4000-8000-000000000020';
       const stop = '00000000-0000-4000-8000-000000000021';
       const school = '00000000-0000-4000-8000-000000000030';
@@ -29,8 +31,8 @@ try {
 
       await tx`insert into tenant (id, name) values (${TENANT}, 'Demo Servis')`;
       await tx`
-        insert into identity (id, auth_user_id, phone_e164, full_name)
-        values (${identity}, ${identity}, '+905321000001', 'Demo Şoför')
+        insert into identity (id, auth_user_id, phone_e164, email, full_name)
+        values (${identity}, ${identity}, '+905321000001', 'sofor@demo.local', 'Demo Şoför')
       `;
       await tx`
         insert into tenant_membership (id, tenant_id, identity_id, status)
@@ -39,6 +41,18 @@ try {
       await tx`
         insert into membership_role (tenant_id, membership_id, role)
         values (${TENANT}, ${membership}, 'DRIVER')
+      `;
+      await tx`
+        insert into identity (id, auth_user_id, phone_e164, email, full_name)
+        values (${adminIdentity}, ${adminIdentity}, '+905321000002', 'admin@demo.local', 'Demo Yönetici')
+      `;
+      await tx`
+        insert into tenant_membership (id, tenant_id, identity_id, status)
+        values (${adminMembership}, ${TENANT}, ${adminIdentity}, 'ACTIVE')
+      `;
+      await tx`
+        insert into membership_role (tenant_id, membership_id, role)
+        values (${TENANT}, ${adminMembership}, 'ADMIN')
       `;
       await tx`
         insert into address (id, tenant_id, "text", il, ilce, lat, lng)

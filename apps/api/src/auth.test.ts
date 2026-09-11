@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from './app.js';
 import type { AppData } from './data/ports.js';
 import type { Env } from './env.js';
+import { HttpError } from './http-error.js';
 
 const testEnv: Env = {
   NODE_ENV: 'test',
@@ -29,7 +30,10 @@ const platform = {
   flags: { betaMap: false },
 };
 
-function sessionFor(role: 'ADMIN' | 'GUARDIAN' | 'DRIVER') {
+function sessionFor(
+  role: 'ADMIN' | 'GUARDIAN' | 'DRIVER',
+  status: 'ACTIVE' | 'INVITED' = 'ACTIVE',
+) {
   return {
     identityId,
     fullName: 'Ayşe Yönetici',
@@ -40,14 +44,17 @@ function sessionFor(role: 'ADMIN' | 'GUARDIAN' | 'DRIVER') {
         membershipId,
         tenantId,
         tenantName: 'Demo',
-        status: 'ACTIVE' as const,
+        status,
         roles: [role],
       },
     ],
   };
 }
 
-function testData(role: 'ADMIN' | 'GUARDIAN' | 'DRIVER' = 'ADMIN'): {
+function testData(
+  role: 'ADMIN' | 'GUARDIAN' | 'DRIVER' = 'ADMIN',
+  status: 'ACTIVE' | 'INVITED' = 'ACTIVE',
+): {
   data: AppData;
   createSchool: ReturnType<typeof vi.fn>;
   pinAddress: ReturnType<typeof vi.fn>;
@@ -55,7 +62,7 @@ function testData(role: 'ADMIN' | 'GUARDIAN' | 'DRIVER' = 'ADMIN'): {
 } {
   const createSchool = vi.fn(() => Promise.resolve({ id: randomUUID() }));
   const pinAddress = vi.fn(() => Promise.resolve({ id: randomUUID() }));
-  const resolve = vi.fn(() => Promise.resolve(sessionFor(role)));
+  const resolve = vi.fn(() => Promise.resolve(sessionFor(role, status)));
   return {
     createSchool,
     pinAddress,
@@ -64,6 +71,8 @@ function testData(role: 'ADMIN' | 'GUARDIAN' | 'DRIVER' = 'ADMIN'): {
       getPlatform: vi.fn(() => Promise.resolve(platform)),
       session: {
         resolve,
+        findDevLoginIdentity: vi.fn(() => Promise.resolve(null)),
+        findDevParentIdentity: vi.fn(() => Promise.resolve(null)),
       },
       admin: {
         pinAddress,
@@ -88,6 +97,72 @@ function testData(role: 'ADMIN' | 'GUARDIAN' | 'DRIVER' = 'ADMIN'): {
         suggestRouteStopOrder: vi.fn(),
         publishRouteVersion: vi.fn(),
         cloneRouteVersion: vi.fn(() => Promise.resolve({ id: randomUUID(), versionNo: 2 })),
+        createHoliday: vi.fn(() =>
+          Promise.resolve({ schoolId: randomUUID(), date: '2026-09-10', type: 'HOLIDAY' as const }),
+        ),
+        generateHorizon: vi.fn(() => Promise.resolve({ created: 0, skipped: 0, tripIds: [] })),
+        listStaff: vi.fn(() => Promise.resolve([])),
+        getStudent: vi.fn(() => Promise.resolve(null)),
+        endStudent: vi.fn(),
+        revokeGuardian: vi.fn(),
+        changeUnactivatedPhone: vi.fn(),
+        previewImport: vi.fn(),
+        getImport: vi.fn(),
+        commitImport: vi.fn(),
+        createInvite: vi.fn(),
+        sendInviteSms: vi.fn(),
+        listTripsForDate: vi.fn(() => Promise.resolve([])),
+        getTripDetail: vi.fn(() => Promise.resolve(null)),
+        listEventsUnavailable: vi.fn((): { items: []; available: false } => ({
+          items: [],
+          available: false,
+        })),
+        listExceptions: vi.fn(() =>
+          Promise.resolve({
+            available: true as const,
+            exceptions: [],
+            overrides: [],
+            addressChanges: [],
+          }),
+        ),
+        approveDeliveryOverride: vi.fn(),
+        rejectDeliveryOverride: vi.fn(),
+        adminOverrideDelivery: vi.fn(),
+        approveAddressChange: vi.fn(),
+        rejectAddressChange: vi.fn(),
+      },
+      parent: {
+        listChildren: vi.fn(() => Promise.resolve([])),
+        previewInvite: vi.fn(() => Promise.resolve(null)),
+        activateInvite: vi.fn(),
+        getHome: vi.fn(() => Promise.resolve({ children: [] })),
+        pollTracking: vi.fn(),
+        createRideException: vi.fn(),
+        cancelRideException: vi.fn(),
+        createDeliveryOverride: vi.fn(),
+        cancelDeliveryOverride: vi.fn(),
+        resendDeliveryOtp: vi.fn(),
+        getParentDayPlan: vi.fn(),
+        createAddressChange: vi.fn(),
+      },
+      trips: {
+        generateHorizon: vi.fn(() => Promise.resolve({ created: 0, skipped: 0, tripIds: [] })),
+        listForDate: vi.fn(() => Promise.resolve([])),
+        getDetail: vi.fn(() => Promise.resolve(null)),
+        recordVehicleCheck: vi.fn(),
+        startTrip: vi.fn(),
+        completeTrip: vi.fn(),
+        cancelTrip: vi.fn(),
+        applyStudentCommand: vi.fn(),
+        reportIncident: vi.fn(),
+        ingestLocation: vi.fn(),
+        verifyDeliveryOtp: vi.fn(),
+        ackCriticalChange: vi.fn(),
+      },
+      realtime: {
+        vehicleBroadcasts: vi.fn(() => []),
+        endedTripIds: vi.fn(() => []),
+        viewerCount: vi.fn(() => 0),
       },
     },
   };
@@ -188,6 +263,7 @@ describe('kimlik ve kurulum', () => {
       headers: {
         authorization: `Bearer ${jwt}`,
         'x-client': 'admin',
+        'x-app-version': '1.4.2',
       },
     });
     expect(response.statusCode).toBe(200);
@@ -205,6 +281,7 @@ describe('kimlik ve kurulum', () => {
       headers: {
         authorization: `Bearer ${jwt}`,
         'x-client': 'admin',
+        'x-app-version': '1.4.2',
       },
     });
     expect(response.statusCode).toBe(401);
@@ -221,6 +298,7 @@ describe('kimlik ve kurulum', () => {
       headers: {
         authorization: `Bearer ${await token()}`,
         'x-client': 'admin',
+        'x-app-version': '1.4.2',
         'x-tenant-id': tenantId,
       },
       payload: {
@@ -243,6 +321,7 @@ describe('kimlik ve kurulum', () => {
       headers: {
         authorization: `Bearer ${await token()}`,
         'x-client': 'admin',
+        'x-app-version': '1.4.2',
         'x-tenant-id': tenantId,
       },
       payload: {
@@ -263,7 +342,7 @@ describe('kimlik ve kurulum', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/v1/session',
-      headers: { 'x-client': 'admin' },
+      headers: { 'x-client': 'admin', 'x-app-version': '1.4.2' },
     });
     expect(response.statusCode).toBe(401);
   });
@@ -283,5 +362,201 @@ describe('kimlik ve kurulum', () => {
     expect(response.statusCode).not.toBe(400);
     expect(response.statusCode).not.toBe(401);
     expect(response.statusCode).not.toBe(403);
+  });
+
+  it('davet önizlemesi oturumsuz okunur', async () => {
+    const { data } = testData();
+    const previewInvite = vi.fn(() =>
+      Promise.resolve({
+        tenantName: 'Güneş Işığı Servis',
+        phoneHint: '***0004',
+        status: 'PENDING' as const,
+      }),
+    );
+    data.parent.previewInvite = previewInvite;
+    const app = appWith(data);
+    apps.push(app);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/invites/abcdefghijklmnop1234567890',
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      tenantName: 'Güneş Işığı Servis',
+      status: 'PENDING',
+    });
+    expect(previewInvite).toHaveBeenCalledTimes(1);
+  });
+
+  it('INVITED yönetici şirket yazamaz', async () => {
+    const { data, createSchool } = testData('ADMIN', 'INVITED');
+    const app = appWith(data);
+    apps.push(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/schools',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'admin',
+        'x-app-version': '1.4.2',
+        'x-tenant-id': tenantId,
+      },
+      payload: {
+        name: 'Güneş',
+        level: 'PRIMARY',
+        addressId: randomUUID(),
+      },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(createSchool).not.toHaveBeenCalled();
+  });
+
+  it('INVITED veli çocuk listesini alamaz', async () => {
+    const { data } = testData('GUARDIAN', 'INVITED');
+    const listChildren = vi.fn(() => Promise.resolve([]));
+    data.parent.listChildren = listChildren;
+    const app = appWith(data);
+    apps.push(app);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/parent/children',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'parent',
+        'x-app-version': '1.4.2',
+        'x-tenant-id': tenantId,
+      },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(listChildren).not.toHaveBeenCalled();
+  });
+
+  it('INVITED veli daveti aktive edebilir', async () => {
+    const { data } = testData('GUARDIAN', 'INVITED');
+    const activateInvite = vi.fn(() => Promise.resolve({ membershipId, children: [] }));
+    data.parent.activateInvite = activateInvite;
+    const app = appWith(data);
+    apps.push(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/parent/invites/activate',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'parent',
+        'x-app-version': '1.4.2',
+      },
+      payload: { token: 'abcdefghijklmnop1234567890' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(activateInvite).toHaveBeenCalledTimes(1);
+  });
+
+  it('bağlanmamış veli daveti JWT telefonuyla aktive eder', async () => {
+    const { data, resolve } = testData('GUARDIAN', 'INVITED');
+    resolve.mockRejectedValue(
+      new HttpError(403, 'identity_not_provisioned', 'Bu hesap henüz tanımlanmamış'),
+    );
+    const activateInvite = vi.fn(() => Promise.resolve({ membershipId, children: [] }));
+    data.parent.activateInvite = activateInvite;
+    const app = appWith(data);
+    apps.push(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/parent/invites/activate',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'parent',
+        'x-app-version': '1.4.2',
+      },
+      payload: { token: 'abcdefghijklmnop1234567890' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(activateInvite).toHaveBeenCalledWith('abcdefghijklmnop1234567890', {
+      authUserId,
+      identityId: '',
+      phone: '+905321234567',
+    });
+  });
+
+  it('yönetici sürüm kapısını atlayamaz', async () => {
+    const { data, resolve } = testData('ADMIN');
+    const app = appWith(data);
+    apps.push(app);
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/v1/session',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'admin',
+      },
+    });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.json()).toMatchObject({ error: 'app_version_required' });
+    expect(resolve).not.toHaveBeenCalled();
+
+    const outdated = await app.inject({
+      method: 'GET',
+      url: '/v1/session',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'admin',
+        'x-app-version': '0.9.0',
+      },
+    });
+    expect(outdated.statusCode).toBe(426);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('veli istemcisi yönetim uçlarını çağıramaz', async () => {
+    const { data, createSchool } = testData('GUARDIAN');
+    const app = appWith(data);
+    apps.push(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/schools',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'parent',
+        'x-app-version': '1.4.2',
+        'x-tenant-id': tenantId,
+      },
+      payload: {
+        name: 'Güneş',
+        level: 'PRIMARY',
+        addressId: randomUUID(),
+      },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(createSchool).not.toHaveBeenCalled();
+  });
+
+  it('veli ana ekranı GUARDIAN üyelik ister; sefer listesini açmaz', async () => {
+    const { data } = testData('GUARDIAN');
+    const app = appWith(data);
+    apps.push(app);
+    const home = await app.inject({
+      method: 'GET',
+      url: '/v1/parent/home',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'parent',
+        'x-app-version': '1.4.2',
+        'x-tenant-id': tenantId,
+      },
+    });
+    expect(home.statusCode).toBe(200);
+    expect(home.json()).toMatchObject({ children: [] });
+
+    const trips = await app.inject({
+      method: 'GET',
+      url: '/v1/trips?date=2026-09-11',
+      headers: {
+        authorization: `Bearer ${await token()}`,
+        'x-client': 'parent',
+        'x-app-version': '1.4.2',
+        'x-tenant-id': tenantId,
+      },
+    });
+    expect(trips.statusCode).toBe(403);
   });
 });
