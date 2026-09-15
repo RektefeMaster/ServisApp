@@ -25,10 +25,6 @@ const schema = z.object({
   OTP_ENCRYPTION_KEY: z.string().min(32),
 
   SENTRY_DSN: z.string().optional(),
-  OTEL_EXPORTER_OTLP_ENDPOINT: z.preprocess(
-    (value) => (value === '' || value === undefined ? undefined : value),
-    z.url().optional(),
-  ),
   // Tarayıcıdaki admin paneli (Next). Mobil CORS kullanmaz. Boşsa CORS kapalı kalır.
   ADMIN_ORIGINS: z.preprocess(
     (value) => (value === '' || value === undefined ? undefined : value),
@@ -58,6 +54,27 @@ const schema = z.object({
   NETGSM_MSGHEADER: z.preprocess(
     (value) => (value === '' || value === undefined ? undefined : value),
     z.string().min(1).optional(),
+  ),
+  /**
+   * Platformun YAZDIĞI istemci IP başlığı (ör. Fly'da `fly-client-ip`).
+   *
+   * Vekil arkasında `request.ip` her istek için vekilin adresidir; IP tabanlı
+   * bütün sınırlar (sahte jeton sayacı, `/v1/config`, davet önizlemesi) tek bir
+   * kovaya düşer. Bir saldırganın 40 hatalı jetonu bütün velileri 429'a
+   * kilitleyebiliyordu. Fly Proxy `Fly-Client-IP`'yi kendi yazar ve istemciden
+   * gelenin üstüne biner; bu yüzden CIDR tahmin etmek yerine başlık adı
+   * yapılandırılır. Uygulama YALNIZ vekil üzerinden erişilebiliyorsa doldurun.
+   */
+  CLIENT_IP_HEADER: z.preprocess(
+    (value) => {
+      if (typeof value !== 'string') return undefined;
+      const trimmed = value.trim().toLowerCase();
+      return trimmed.length === 0 ? undefined : trimmed;
+    },
+    z
+      .string()
+      .regex(/^[a-z0-9-]{1,64}$/, 'CLIENT_IP_HEADER yalnız harf, rakam ve tire içerir')
+      .optional(),
   ),
   /**
    * Güvenilen vekil IP/CIDR listesi. `true`, `1` ve hop-count (sayı) reddedilir:

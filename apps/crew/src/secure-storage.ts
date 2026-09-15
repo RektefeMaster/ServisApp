@@ -16,11 +16,7 @@ async function setNative(key: string, value: string): Promise<void> {
   const parts = Math.ceil(value.length / CHUNK);
   await SecureStore.setItemAsync(key, `__chunks__:${parts}`, OPTIONS);
   for (let i = 0; i < parts; i += 1) {
-    await SecureStore.setItemAsync(
-      `${key}.${i}`,
-      value.slice(i * CHUNK, (i + 1) * CHUNK),
-      OPTIONS,
-    );
+    await SecureStore.setItemAsync(`${key}.${i}`, value.slice(i * CHUNK, (i + 1) * CHUNK), OPTIONS);
   }
 }
 

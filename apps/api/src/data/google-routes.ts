@@ -10,6 +10,14 @@ import {
 const ROUTES_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes';
 const FIELD_MASK = 'routes.legs.duration,routes.legs.distanceMeters';
 
+/**
+ * Tek istek ve tüm parçalar için üst sınır. Baseline "iyi olsa güzel"dir:
+ * Google yavaşladığında sefer akışının beklemesindense Haversine'a düşmek
+ * doğrudur. Süre dolarsa `null` döner, çağıran zaten Haversine kullanır.
+ */
+const REQUEST_TIMEOUT_MS = 4_000;
+const TOTAL_BUDGET_MS = 10_000;
+
 export interface GoogleBaselineResult {
   baseline: RouteBaseline;
   httpCalls: number;
@@ -35,16 +43,30 @@ export async function computeGoogleRouteBaseline(
   const chunkDurationSec: number[] = [];
   let timed = chunks;
   let httpCalls = 0;
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
 
   for (let index = 0; index < timed.length; index += 1) {
     const chunk = timed[index];
     if (!chunk) return null;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
     const slice = points.slice(chunk.startIndex, chunk.endIndex + 1);
     const origin = slice[0];
     const destination = slice[slice.length - 1];
     if (!origin || !destination) return null;
-    const departureMs = Math.max(now.getTime(), startedAt.getTime() + chunk.departureOffsetSec * 1000);
-    const legs = await requestChunk(fetchImpl, apiKey, slice, origin, destination, new Date(departureMs));
+    const departureMs = Math.max(
+      now.getTime(),
+      startedAt.getTime() + chunk.departureOffsetSec * 1000,
+    );
+    const legs = await requestChunk(
+      fetchImpl,
+      apiKey,
+      slice,
+      origin,
+      destination,
+      new Date(departureMs),
+      Math.min(REQUEST_TIMEOUT_MS, remaining),
+    );
     if (!legs) return null;
     httpCalls += 1;
     parts.push(legs);
@@ -69,12 +91,14 @@ async function requestChunk(
   origin: RoutePoint,
   destination: RoutePoint,
   departureTime: Date,
+  timeoutMs: number,
 ): Promise<BaselineLeg[] | null> {
   const intermediates = slice.slice(1, -1).map((point) => latLng(point));
   let response: Response;
   try {
     response = await fetchImpl(ROUTES_URL, {
       method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         'content-type': 'application/json',
         'X-Goog-Api-Key': apiKey,
@@ -98,7 +122,9 @@ async function requestChunk(
   return parseLegs(slice, body);
 }
 
-function latLng(point: RoutePoint): { location: { latLng: { latitude: number; longitude: number } } } {
+function latLng(point: RoutePoint): {
+  location: { latLng: { latitude: number; longitude: number } };
+} {
   return {
     location: { latLng: { latitude: point.lat, longitude: point.lng } },
   };

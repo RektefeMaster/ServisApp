@@ -38,13 +38,14 @@ import {
   exhaustive,
   haversineMeters,
   OTP_MAX_ATTEMPTS,
+  OTP_MAX_RESENDS,
   otpLockedAfterAttempts,
   reconcileCancelRideException,
   reconcileStudent,
   ymdInTimeZone,
   zonedDayEnd,
 } from '@servisapp/domain';
-import { and, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import {
   decryptDeliveryOtp,
   encryptDeliveryOtp,
@@ -54,7 +55,8 @@ import {
 } from '../crypto/delivery-otp.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http-error.js';
 import { isUniqueViolation, mapDbError } from './db-error.js';
-import { queueGuardianNotifications } from './notify-queue.js';
+import { queueGuardianNotifications, queuePhoneNotification } from './notify-queue.js';
+import { phoneHint } from './invite-token.js';
 import {
   applyTripStudentPlan,
   cancelActiveOverrides,
@@ -63,6 +65,7 @@ import {
   raiseCriticalAlert,
   requirePlanApplied,
 } from './plan-reconcile.js';
+import { planPairForStudent } from './plan-query.js';
 import { firstRow } from './sql-result.js';
 import { refreshRoutesIfTripChanged } from './tracking.js';
 
@@ -127,7 +130,15 @@ async function assertCrewOnTrip(
     .where(and(eq(trip.id, tripId), eq(trip.tenantId, tenantId)));
   if (!header) throw notFound('Sefer bulunamadı');
   if (roles.includes('ADMIN')) return;
-  const now = new Date();
+  /**
+   * Erişim penceresi seferin "ilgili anı"nda değerlendirilir — sefer listesiyle
+   * AYNI kural (`trips.ts`). Burada eskiden yalnız planlanan kalkışa bakılıyordu:
+   * kalkıştan sonra atanan yedek şoför seferi açabiliyor, çocuğu bindirip
+   * teslim edebiliyor, ama teslim kodunu doğrulayamıyor ve kritik değişiklik
+   * uyarısını kapatamıyordu — yani kapıda kilitleniyordu. İki uç da aynı
+   * pencereyi kullanmalı.
+   */
+  const at = sql`greatest(${new Date().toISOString()}::timestamptz, ${header.plannedDepartureAt.toISOString()}::timestamptz)`;
   const [assigned] = await tx
     .select({ tripId: tripCrewAssignment.tripId })
     .from(tripCrewAssignment)
@@ -136,8 +147,8 @@ async function assertCrewOnTrip(
         eq(tripCrewAssignment.tenantId, tenantId),
         eq(tripCrewAssignment.tripId, tripId),
         eq(tripCrewAssignment.membershipId, membershipId),
-        or(isNull(tripCrewAssignment.validTo), gt(tripCrewAssignment.validTo, now)),
-        lte(tripCrewAssignment.validFrom, header.plannedDepartureAt),
+        sql`${tripCrewAssignment.validFrom} <= ${at}`,
+        sql`(${tripCrewAssignment.validTo} is null or ${tripCrewAssignment.validTo} > ${at})`,
       ),
     );
   if (!assigned) throw notFound('Sefer bulunamadı');
@@ -201,6 +212,44 @@ async function notifyGuardians(
   });
 }
 
+/**
+ * Teslim kodu, velinin belirlediği alıcının telefonuna gider.
+ *
+ * Eskiden kod, yetkili velinin numarasına SMS ile gidiyordu; kapıda çocuğu
+ * teslim alan kişi (teyze, komşu) doğrulanmış olmuyordu — veli kodu telefonla
+ * söylüyordu. Ürün kararı zilyetlik doğrulamasıdır: gidecek kişiyi kayıtlı veli
+ * belirler, kod o numaraya gider, kapıda o kişi söyler. Veliye kodun kendisi
+ * değil, "kod şu numaraya gönderildi" bilgisi düşer.
+ */
+async function notifyDeliveryOtp(
+  tx: Database,
+  input: {
+    tenantId: string;
+    studentId: string;
+    overrideId: string;
+    receiverPhone: string;
+    dedupe: string;
+  },
+): Promise<void> {
+  await queuePhoneNotification(tx, {
+    tenantId: input.tenantId,
+    studentId: input.studentId,
+    phone: input.receiverPhone,
+    type: 'DELIVERY_OTP',
+    dedupe: input.dedupe,
+    refId: input.overrideId,
+  });
+  await queueGuardianNotifications(tx, {
+    tenantId: input.tenantId,
+    studentId: input.studentId,
+    type: 'DELIVERY_OTP_SENT',
+    dedupe: `${input.dedupe}:notice`,
+    channel: 'PUSH',
+    refId: input.overrideId,
+    requireAuthorizeTempAddress: true,
+  });
+}
+
 function asYmd(value: string | Date): string {
   if (typeof value === 'string') {
     const match = /^(\d{4}-\d{2}-\d{2})/.exec(value.trim());
@@ -217,7 +266,13 @@ async function homeDropoff(
   tenantId: string,
   studentId: string,
   onDate: string,
-): Promise<{ lat: number; lng: number; text: string; il: string; ilce: string } | null> {
+): Promise<{
+  lat: number;
+  lng: number;
+  text: string;
+  il: string | null;
+  ilce: string | null;
+} | null> {
   const [row] = await tx
     .select({
       lat: address.lat,
@@ -387,7 +442,12 @@ async function applyOverrideToAfternoon(
         break;
       }
       case 'REJECT':
-        throw conflict('student_on_board', 'Çocuk araçta; farklı teslimat uygulanamaz');
+        // Talep yazılırken çocuk araçta değildi, onaya kadar bindi: yarış
+        // gerçek ama nadir. Yöneticiye ne yapacağını söyle.
+        throw conflict(
+          'student_on_board',
+          'Çocuk araca bindi; farklı teslimat uygulanamaz. Talebi reddedip aileyi arayın.',
+        );
       case 'FLAG_FOR_REVIEW':
         await applyTripStudentPlan(tx, { tripStudentId: item.tripStudentId, needsReview: true });
         break;
@@ -400,15 +460,48 @@ async function applyOverrideToAfternoon(
   }
 }
 
-function issueOtp(secrets: OtpSecrets, serviceDate: string, timeZone: string) {
+/**
+ * Kodu üretir ve definer fonksiyona yazdırır.
+ *
+ * Kod, hash ve ciphertext burada üretilir — pepper ile şifreleme anahtarı yalnız
+ * bu süreçte yaşar, veritabanı onları hiç görmez. "Bu talebe kod yazılabilir mi,
+ * kaçıncı yenileme bu" kararı ise veritabanınındır (migration 0037): API rolünün
+ * kod kolonlarına doğrudan yazma yetkisi yoktur.
+ */
+async function issueOtp(
+  tx: Database,
+  secrets: OtpSecrets,
+  overrideId: string,
+  serviceDate: string,
+  timeZone: string,
+  options: { resend: boolean },
+): Promise<{ resendCount: number }> {
   const code = generateDeliveryOtpCode();
   const expiresAt = new Date(zonedDayEnd(serviceDate, timeZone).getTime() + 6 * 60 * 60 * 1000);
-  return {
-    code,
-    hmac: hmacDeliveryOtp(code, secrets.pepper),
-    ciphertext: encryptDeliveryOtp(code, secrets.encryptionKey),
-    expiresAt,
-  };
+  const issued = firstRow(
+    await tx.execute(sql`
+      select issue_delivery_otp(
+        ${overrideId}::uuid,
+        ${hmacDeliveryOtp(code, secrets.pepper)}::bytea,
+        ${encryptDeliveryOtp(code, secrets.encryptionKey)}::bytea,
+        ${expiresAt.toISOString()}::timestamptz,
+        ${options.resend}::boolean,
+        ${OTP_MAX_RESENDS}::integer
+      ) as resend_count
+    `),
+  );
+  return { resendCount: Number(issued?.['resend_count'] ?? issued?.['resendCount'] ?? 0) };
+}
+
+/** Kodu siler ve talebi kapatır; durum uymuyorsa sessizce false döner (0037). */
+async function clearOtp(
+  tx: Database,
+  overrideId: string,
+  nextStatus: 'EXPIRED' | 'CANCELLED',
+): Promise<void> {
+  await tx.execute(
+    sql`select clear_delivery_otp(${overrideId}::uuid, ${nextStatus}::delivery_override_status)`,
+  );
 }
 
 function overrideToView(
@@ -424,7 +517,7 @@ function overrideToView(
     addressText: string;
     detourM: number;
     maxDetourM: number;
-    otpCode: string | null;
+    otpSentTo: string | null;
   },
 ): DeliveryOverrideView {
   return {
@@ -437,7 +530,7 @@ function overrideToView(
     addressText: extra.addressText,
     detourM: extra.detourM,
     maxDetourM: extra.maxDetourM,
-    otpCode: extra.otpCode,
+    otpSentTo: extra.otpSentTo,
   };
 }
 
@@ -564,6 +657,25 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const today = ymdInTimeZone(new Date(), zone);
         if (input.serviceDate < today)
           throw badRequest('past_date', 'Geçmiş gün için farklı teslimat yok');
+        // Çocuk araca bindiyse bu talep ASLA onaylanamaz (`reconcileStudent`:
+        // operasyonel gerçek kazanır). Kontrol eskiden yalnız onay anında
+        // yapılıyordu: sapması küçük olan talep hemen patlıyor, büyük olan
+        // sessizce "onay bekliyor" olarak kaydediliyordu. Veli ekranda
+        // "yönetici onaylayınca kod gelecek" yazısıyla kalıyor, yönetici ise
+        // onaylayamadığı bir satırla baş başa kalıyordu. Yazmadan önce reddet.
+        const boarded = await findOpenTripStudents(
+          tx,
+          tenantId,
+          input.studentId,
+          input.serviceDate,
+          'AFTERNOON',
+        );
+        if (boarded.some((item) => item.studentState === 'ON_BOARD')) {
+          throw conflict(
+            'student_on_board',
+            'Çocuk araca bindi; bugünün teslim adresi artık değiştirilemez. Servis şirketini arayın.',
+          );
+        }
         const baseline = await homeDropoff(tx, tenantId, input.studentId, input.serviceDate);
         const maxDetourM = await routeMaxDetour(tx, tenantId, input.studentId);
         const detourM = baseline
@@ -580,14 +692,14 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .values({
             tenantId,
             text: input.addressText,
-            il: baseline?.il ?? 'İstanbul',
-            ilce: baseline?.ilce ?? 'Kadıköy',
+            // Veli pinini ilçeye zorlamıyoruz: bilinmiyorsa boş kalır (0036).
+            il: baseline?.il ?? null,
+            ilce: baseline?.ilce ?? null,
             lat: input.lat,
             lng: input.lng,
           })
           .returning({ id: address.id });
         if (!addr) throw new HttpError(500, 'insert_failed', 'Adres kaydedilemedi');
-        const otp = decision === 'AUTO' ? issueOtp(secrets, input.serviceDate, zone) : null;
         const [row] = await tx
           .insert(deliveryOverride)
           .values({
@@ -598,9 +710,6 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             receiverName: input.receiverName,
             receiverPhone: input.receiverPhone,
             status: decision === 'AUTO' ? 'ACTIVE' : 'PENDING_APPROVAL',
-            otpHmac: otp?.hmac,
-            otpCiphertext: otp?.ciphertext,
-            otpExpiresAt: otp?.expiresAt,
           })
           .returning({
             id: deliveryOverride.id,
@@ -610,6 +719,11 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
             receiverName: deliveryOverride.receiverName,
           });
         if (!row) throw new HttpError(500, 'insert_failed', 'Teslim talebi yazılamadı');
+        // Kod kolonlarına yalnız definer fonksiyon yazar (0037).
+        const otp =
+          decision === 'AUTO'
+            ? await issueOtp(tx, secrets, row.id, input.serviceDate, zone, { resend: false })
+            : null;
         if (decision === 'AUTO') {
           await applyOverrideToAfternoon(tx, {
             tenantId,
@@ -629,22 +743,20 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           `ov:${input.studentId}:${input.serviceDate}`,
         );
         if (otp) {
-        await notifyGuardians(
-          tx,
-          tenantId,
-          input.studentId,
-          'DELIVERY_OTP',
-          `otp:${row.id}:0`,
-          'SMS',
-          { refId: row.id },
-        );
+          await notifyDeliveryOtp(tx, {
+            tenantId,
+            studentId: input.studentId,
+            overrideId: row.id,
+            receiverPhone: input.receiverPhone,
+            dedupe: `otp:${row.id}:0`,
+          });
         }
         return overrideToView(row, {
           studentName: guardian.studentName,
           addressText: input.addressText,
           detourM,
           maxDetourM,
-          otpCode: otp?.code ?? null,
+          otpSentTo: otp ? phoneHint(input.receiverPhone) : null,
         });
       });
     },
@@ -704,7 +816,10 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           throw forbidden('Bu veli farklı teslimat yetkisine sahip değil');
         }
         if (row.status !== 'ACTIVE' && row.status !== 'EXPIRED')
-          throw conflict('override_not_active', 'Kod yalnız aktif veya süresi dolmuş talepte yenilenir');
+          throw conflict(
+            'override_not_active',
+            'Kod yalnız aktif veya süresi dolmuş talepte yenilenir',
+          );
         const resendCount = Number(row.resendCount);
         const used = Number.isFinite(resendCount) ? resendCount : 0;
         if (!canResendOtp(used))
@@ -714,34 +829,22 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         const expired =
           row.status === 'EXPIRED' ||
           Boolean(row.otpExpiresAt && row.otpExpiresAt.getTime() <= Date.now());
-        let code: string;
-        const nextResend = used + 1;
+        let nextResend = used + 1;
         if (expired || !asBuffer(row.otpCiphertext)) {
-          const otp = issueOtp(secrets, serviceDate, zone);
-          // protect_otp_columns: non-null → non-null yasak; önce temizle.
-          await tx
-            .update(deliveryOverride)
-            .set({ otpHmac: null, otpCiphertext: null })
-            .where(
-              and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)),
-            );
-          await tx
-            .update(deliveryOverride)
-            .set({
-              otpHmac: otp.hmac,
-              otpCiphertext: otp.ciphertext,
-              otpExpiresAt: otp.expiresAt,
-              resendCount: nextResend,
-              attemptCount: 0,
-              status: 'ACTIVE',
-            })
-            .where(
-              and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)),
-            );
-          code = otp.code;
+          // Yeni kod: sayacı ve limiti veritabanı yürütür (0037).
+          ({ resendCount: nextResend } = await issueOtp(
+            tx,
+            secrets,
+            overrideId,
+            serviceDate,
+            zone,
+            { resend: true },
+          ));
         } else {
+          // Kod artık yanıtta dönmüyor; yine de saklı şifreli kodun okunabilir
+          // olduğunu doğrularız — bozuk kayıtla SMS göndermek anlamsız olurdu.
           try {
-            code = decryptDeliveryOtp(asBuffer(row.otpCiphertext)!, secrets.encryptionKey);
+            decryptDeliveryOtp(asBuffer(row.otpCiphertext)!, secrets.encryptionKey);
           } catch {
             throw new HttpError(500, 'otp_decrypt_failed', 'Teslim kodu çözülemedi');
           }
@@ -756,18 +859,16 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .select({ text: address.text })
           .from(address)
           .where(and(eq(address.id, row.addressId), eq(address.tenantId, tenantId)));
-        await notifyGuardians(
-          tx,
+        await notifyDeliveryOtp(tx, {
           tenantId,
-          row.studentId,
-          'DELIVERY_OTP',
-          `otp:${row.id}:${nextResend}`,
-          'SMS',
-          { refId: row.id },
-        );
+          studentId: row.studentId,
+          overrideId: row.id,
+          receiverPhone: row.receiverPhone,
+          dedupe: `otp:${row.id}:${nextResend}`,
+        });
         return {
           id: row.id,
-          otpCode: code,
+          otpSentTo: phoneHint(row.receiverPhone),
           addressText: addr?.text ?? '',
           resendCount: nextResend,
         };
@@ -845,12 +946,7 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           return { kind: 'locked' as const };
         }
         if (override.otpExpiresAt && override.otpExpiresAt.getTime() <= Date.now()) {
-          await tx
-            .update(deliveryOverride)
-            .set({ status: 'EXPIRED', otpCiphertext: null, otpHmac: null })
-            .where(
-              and(eq(deliveryOverride.id, override.id), eq(deliveryOverride.tenantId, tenantId)),
-            );
+          await clearOtp(tx, override.id, 'EXPIRED');
           return { kind: 'expired' as const };
         }
         const stored = asBuffer(override.otpHmac);
@@ -961,8 +1057,9 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           .values({
             tenantId,
             text: input.addressText,
-            il: baseline?.il ?? 'İstanbul',
-            ilce: baseline?.ilce ?? 'Kadıköy',
+            // Bilinmiyorsa boş kalır; uydurulmuş ilçe veriyi kirletiyordu (0036).
+            il: baseline?.il ?? null,
+            ilce: baseline?.ilce ?? null,
             lat: input.lat,
             lng: input.lng,
           })
@@ -1147,16 +1244,7 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         if (!addr || !named) throw notFound('Teslim talebi bulunamadı');
         const zone = await tenantZone(tx, tenantId);
         const serviceDate = asYmd(row.serviceDate);
-        const otp = issueOtp(secrets, serviceDate, zone);
-        await tx
-          .update(deliveryOverride)
-          .set({
-            status: 'ACTIVE',
-            otpHmac: otp.hmac,
-            otpCiphertext: otp.ciphertext,
-            otpExpiresAt: otp.expiresAt,
-          })
-          .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
+        await issueOtp(tx, secrets, overrideId, serviceDate, zone, { resend: false });
         await applyOverrideToAfternoon(tx, {
           tenantId,
           membershipId,
@@ -1166,15 +1254,13 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
           receiverName: row.receiverName,
           dropoff: { lat: addr.lat, lng: addr.lng, text: addr.text },
         });
-        await notifyGuardians(
-          tx,
+        await notifyDeliveryOtp(tx, {
           tenantId,
-          row.studentId,
-          'DELIVERY_OTP',
-          `otp:${row.id}:0`,
-          'SMS',
-          { refId: row.id },
-        );
+          studentId: row.studentId,
+          overrideId: row.id,
+          receiverPhone: row.receiverPhone,
+          dedupe: `otp:${row.id}:0`,
+        });
         return { ok: true as const };
       });
     },
@@ -1192,10 +1278,7 @@ export function createExceptionsPort(db: Database, secrets: OtpSecrets) {
         if (!row) throw notFound('Teslim talebi bulunamadı');
         if (row.status !== 'PENDING_APPROVAL')
           throw conflict('override_not_pending', 'Reddedilecek bekleyen talep yok');
-        await tx
-          .update(deliveryOverride)
-          .set({ status: 'CANCELLED', otpCiphertext: null })
-          .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
+        await clearOtp(tx, overrideId, 'CANCELLED');
         return { ok: true as const };
       });
     },
@@ -1340,9 +1423,10 @@ async function loadDayPlan(
         isNull(rideException.cancelledAt),
       ),
     );
-  await tx
-    .update(deliveryOverride)
-    .set({ status: 'EXPIRED', otpCiphertext: null, otpHmac: null })
+  // Süresi dolmuş kodu kapatmak da definer yolundan geçer (0037).
+  const stale = await tx
+    .select({ id: deliveryOverride.id })
+    .from(deliveryOverride)
     .where(
       and(
         eq(deliveryOverride.tenantId, tenantId),
@@ -1352,6 +1436,9 @@ async function loadDayPlan(
         lte(deliveryOverride.otpExpiresAt, new Date()),
       ),
     );
+  for (const row of stale) {
+    await clearOtp(tx, row.id, 'EXPIRED');
+  }
   const [override] = await tx
     .select({
       id: deliveryOverride.id,
@@ -1359,6 +1446,7 @@ async function loadDayPlan(
       serviceDate: deliveryOverride.serviceDate,
       status: deliveryOverride.status,
       receiverName: deliveryOverride.receiverName,
+      receiverPhone: deliveryOverride.receiverPhone,
       ciphertext: deliveryOverride.otpCiphertext,
       addressText: address.text,
     })
@@ -1376,18 +1464,15 @@ async function loadDayPlan(
       ),
     )
     .limit(1);
-  let otpCode: string | null = null;
-  if (revealOtp && override?.status === 'ACTIVE') {
-    const packed = asBuffer(override.ciphertext);
-    if (packed) {
-      try {
-        otpCode = decryptDeliveryOtp(packed, secrets.encryptionKey);
-      } catch {
-        throw new HttpError(500, 'otp_decrypt_failed', 'Teslim kodu çözülemedi');
-      }
-    }
+  // Kod veliye hiç açılmaz; yalnız kimin numarasına gittiği söylenir.
+  let otpSentTo: string | null = null;
+  if (revealOtp && override?.status === 'ACTIVE' && asBuffer(override.ciphertext)) {
+    otpSentTo = phoneHint(override.receiverPhone);
   }
+  const plan = await planPairForStudent(tx, tenantId, studentId);
   return {
+    morningPlanStatus: plan?.morning ?? 'PREPARING',
+    eveningPlanStatus: plan?.evening ?? 'PREPARING',
     morningAbsent: exceptions.some((row) => row.segment === 'MORNING'),
     eveningAbsent: exceptions.some((row) => row.segment === 'AFTERNOON'),
     morningExceptionId: exceptions.find((row) => row.segment === 'MORNING')?.id ?? null,
@@ -1398,7 +1483,7 @@ async function loadDayPlan(
           addressText: override.addressText,
           detourM: 0,
           maxDetourM: 0,
-          otpCode,
+          otpSentTo,
         })
       : null,
   };

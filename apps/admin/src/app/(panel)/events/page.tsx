@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/session';
+import { eventTypeLabel, studentStateLabel } from '@/lib/labels';
 
 function todayYmd(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
@@ -25,19 +26,27 @@ export default function EventsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Yarış koruması: eski yanıtın CSV'si yeni tarihin dosya adıyla
+    // indirilebiliyordu.
+    let cancelled = false;
     void apiFetch<{ available: true; items: EventRow[]; csv: string }>(
       `/v1/admin/events?date=${date}`,
     )
       .then((body) => {
+        if (cancelled) return;
         setItems(body.items);
         setCsv(body.csv);
         setError(null);
       })
       .catch((caught: unknown) => {
+        if (cancelled) return;
         setItems([]);
         setCsv('');
         setError(caught instanceof Error ? caught.message : 'Olay listesi okunamadı');
       });
+    return () => {
+      cancelled = true;
+    };
   }, [date]);
 
   function downloadCsv() {
@@ -61,7 +70,7 @@ export default function EventsPage() {
           type="date"
           value={date}
           onChange={(event) => setDate(event.target.value)}
-          className="rounded border border-rule bg-white px-2 py-1 text-sm"
+          className="rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
         />
         <button
           type="button"
@@ -79,10 +88,14 @@ export default function EventsPage() {
         ) : (
           items.map((row) => (
             <li key={`${row.seq}-${row.occurredAt}`} className="px-4 py-2">
-              <span className="text-muted">{new Date(row.occurredAt).toLocaleTimeString('tr-TR')}</span>
+              <span className="text-muted">
+                {new Date(row.occurredAt).toLocaleTimeString('tr-TR')}
+              </span>
               {' · '}
-              {row.eventType}
-              {row.newState ? ` · ${row.prevState ?? '—'} → ${row.newState}` : ''}
+              {eventTypeLabel(row.eventType)}
+              {row.newState
+                ? ` · ${studentStateLabel(row.prevState)} → ${studentStateLabel(row.newState)}`
+                : ''}
               {row.actorRole ? ` · ${row.actorRole}` : ''}
             </li>
           ))

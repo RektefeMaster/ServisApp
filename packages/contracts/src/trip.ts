@@ -268,6 +268,7 @@ export const adminPriorityKind = z.enum([
   'OTP_LOCKED',
   'OVERRIDE_PENDING',
   'NEEDS_REVIEW',
+  'VEHICLE_DOCUMENT',
 ]);
 export type AdminPriorityKind = z.infer<typeof adminPriorityKind>;
 

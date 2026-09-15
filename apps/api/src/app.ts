@@ -14,6 +14,7 @@ import { registerSessionRoutes } from './modules/session/routes.js';
 import { registerTripAdminRoutes, registerTripRoutes } from './modules/trips/routes.js';
 import { Sentry } from './observability.js';
 import { registerAuth } from './plugins/auth.js';
+import { createClientIp } from './plugins/client-ip.js';
 import { generateRequestId, registerRequestContext } from './plugins/request-context.js';
 
 export interface AppDeps {
@@ -84,8 +85,36 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
     bodyLimit: 1_048_576,
   });
 
+  /**
+   * Gövdesiz POST, `content-type: application/json` ile gelse bile kabul edilir.
+   *
+   * Fastify varsayılanı boş gövdeyi FST_ERR_CTP_EMPTY_JSON_BODY ile 400'e
+   * düşürür. İstemcilerin çoğu (admin paneli dahil) content-type başlığını her
+   * isteğe koyar; "rota sürümünü yayınla" ve "davet SMS'i gönder" gibi gövdesiz
+   * uçlar bu yüzden hiç çalışmıyordu. Boş gövde = boş nesne.
+   */
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (_request, body: string, done) => {
+      const text = body.trim();
+      if (text.length === 0) {
+        done(null, {});
+        return;
+      }
+      try {
+        done(null, JSON.parse(text) as unknown);
+      } catch {
+        const error = new HttpError(400, 'invalid_body', 'Gövde geçerli JSON değil');
+        done(error, undefined);
+      }
+    },
+  );
+
+  const clientIp = createClientIp(env.CLIENT_IP_HEADER);
+
   registerRequestContext(app);
-  registerAuth(app, { env, data });
+  registerAuth(app, { env, data, clientIp });
 
   void app.register(helmet, { contentSecurityPolicy: false });
   void app.register(cors, {
@@ -113,12 +142,12 @@ export function buildApp({ env, health, data }: AppDeps): FastifyInstance {
         path === '/v1/dev/parent-login' ||
         /^\/v1\/invites\/[^/]+$/.test(path)
       ) {
-        return `ip:${request.ip ?? 'unknown'}`;
+        return `ip:${clientIp(request)}`;
       }
       const identityId = request.auth?.identityId;
       if (identityId) return `id:${identityId}`;
       // x-device-id istemci uydurmasıdır; bucket anahtarı olamaz.
-      return `ip:${request.ip ?? 'unknown'}`;
+      return `ip:${clientIp(request)}`;
     },
   });
 

@@ -2,12 +2,12 @@
   "expo": {
     "name": "ServisApp Veli",
     "slug": "servisapp-parent",
-    "version": "0.0.0",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "light",
     "scheme": "servisapp-parent",
-    "plugins": ["expo-notifications"],
+    "plugins": ["expo-font", "expo-notifications", "expo-secure-store"],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.servisapp.parent"
@@ -15,7 +15,7 @@
     "android": {
       "package": "app.servisapp.parent",
       "adaptiveIcon": {
-        "backgroundColor": "#0F172A",
+        "backgroundColor": "#EEF1F5",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -24,6 +24,9 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "splash": {
+      "backgroundColor": "#EEF1F5"
     }
   }
 }

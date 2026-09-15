@@ -10,8 +10,13 @@ import {
 } from '@servisapp/domain';
 import * as SQLite from 'expo-sqlite';
 import { ApiError, postCommand, type CrewSession } from './api/client';
+import { getSecret, setSecret } from './secure-storage';
 
 const MEMORY_KEY = 'crew.outbox.v1';
+/** Cihaz kimliğiyle aynı kalıcı depoda tutulur; ikisi birlikte yaşar, birlikte ölür. */
+const DEVICE_SEQ_KEY = 'crew.deviceSeq';
+/** Çözülmemiş çakışma/ret satırlarından bellekte tutulacak en yeni kayıt sayısı. */
+const TERMINAL_KEEP = 50;
 const STATUSES: readonly OutboxStatus[] = [
   'PENDING',
   'IN_FLIGHT',
@@ -28,6 +33,12 @@ let chain: Promise<void> = Promise.resolve();
 export interface FlushOutcome {
   conflicts: OutboxItem[];
   rejected: OutboxItem[];
+  /**
+   * Gönderimi durduran taşıma/sunucu hatası. Eskiden bu hata sessizce yutulup
+   * döngü kırılıyordu: şoför ekranda hiçbir uyarı görmeden, komutlarının
+   * gittiğini sanıyordu. `offline` ayrı tutulur çünkü ekranda farklı anlatılır.
+   */
+  failure?: { code: string; message: string; offline: boolean };
 }
 
 function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -59,12 +70,21 @@ export async function openOutbox(): Promise<void> {
       );
     `);
     try {
-      await db.execAsync(
-        'alter table outbox add column receiver_membership_id text',
-      );
+      await db.execAsync('alter table outbox add column receiver_membership_id text');
     } catch {
       // kolon zaten var
     }
+    // Bitmiş satırlar (APPLIED zaten silinir; CONFLICT/REJECTED şoför çözmezse
+    // kalır) sınırsız birikiyordu: her açılışta hepsi belleğe yükleniyor ve her
+    // render'da taranıyordu. Bir dönem sonra tablo şoförün telefonunda yük olur.
+    await db.execAsync(
+      `delete from outbox where status in ('CONFLICT', 'REJECTED')
+       and client_event_id not in (
+         select client_event_id from outbox
+         where status in ('CONFLICT', 'REJECTED')
+         order by device_seq desc limit ${String(TERMINAL_KEEP)}
+       )`,
+    );
     const rows = await db.getAllAsync<OutboxRow>('select * from outbox order by device_seq asc');
     const loaded = rows.flatMap((row) => {
       const item = fromRow(row);
@@ -115,9 +135,21 @@ export function pendingRejected(): OutboxItem[] {
 
 export function hasOpenCommands(tripId: string): boolean {
   return memory.some(
-    (item) =>
-      item.tripId === tripId && (item.status === 'PENDING' || item.status === 'IN_FLIGHT'),
+    (item) => item.tripId === tripId && (item.status === 'PENDING' || item.status === 'IN_FLIGHT'),
   );
+}
+
+/**
+ * Sıra numarasını ayırır ve kalıcı olarak işaretler. Kilit `runExclusive`
+ * tarafından tutulduğu için aynı numara iki komuta verilemez.
+ */
+async function reserveDeviceSeq(): Promise<number> {
+  const stored = await getSecret(DEVICE_SEQ_KEY);
+  const parsed = stored === null ? Number.NaN : Number(stored);
+  const floor = Number.isInteger(parsed) && parsed >= 0 ? parsed : -1;
+  const next = nextDeviceSeq(memory, floor);
+  await setSecret(DEVICE_SEQ_KEY, String(next));
+  return next;
 }
 
 export async function enqueueCommand(
@@ -126,7 +158,7 @@ export async function enqueueCommand(
   return runExclusive(async () => {
     const item: OutboxItem = {
       ...input,
-      deviceSeq: nextDeviceSeq(memory),
+      deviceSeq: await reserveDeviceSeq(),
       status: 'PENDING',
     };
     memory = [...memory, item];
@@ -141,7 +173,13 @@ export async function flushOutbox(session: CrewSession): Promise<FlushOutcome> {
     const batch = nextFlushBatch(memory);
     const conflicts: OutboxItem[] = [];
     const rejected: OutboxItem[] = [];
+    // Parti başta hesaplanır; ama aynı çocuğun bir komutu çakışırsa SONRAKİ
+    // komutları gönderilmemeli. "Bindi" reddedilmişken "teslim edildi"yi
+    // sunucuya yollamak nedenselliği bozar.
+    const halted = new Set<string>();
+    let failure: FlushOutcome['failure'];
     for (const item of batch) {
+      if (halted.has(item.tripStudentId)) continue;
       await patchItem({ ...item, status: 'IN_FLIGHT' });
       try {
         const result = await postCommand(session, item.tripId, {
@@ -151,9 +189,7 @@ export async function flushOutbox(session: CrewSession): Promise<FlushOutcome> {
           expectedStateSeq: item.expectedStateSeq,
           deviceSeq: item.deviceSeq,
           occurredAtDevice: item.occurredAtDevice,
-          ...(item.receiverMembershipId
-            ? { receiverMembershipId: item.receiverMembershipId }
-            : {}),
+          ...(item.receiverMembershipId ? { receiverMembershipId: item.receiverMembershipId } : {}),
         });
         const next = applyServerResult(item, result);
         if (next.status === 'APPLIED') {
@@ -161,26 +197,45 @@ export async function flushOutbox(session: CrewSession): Promise<FlushOutcome> {
           continue;
         }
         await patchItem(next);
-        if (next.status === 'CONFLICT') conflicts.push(next);
-        if (next.status === 'REJECTED') rejected.push(next);
+        if (next.status === 'CONFLICT') {
+          conflicts.push(next);
+          halted.add(next.tripStudentId);
+        }
+        if (next.status === 'REJECTED') {
+          rejected.push(next);
+          halted.add(next.tripStudentId);
+        }
+        if (next.status === 'PENDING') halted.add(next.tripStudentId);
       } catch (error) {
         await patchItem({ ...item, status: 'PENDING' });
-        if (error instanceof ApiError && (error.status === 401 || error.status === 426)) throw error;
+        if (error instanceof ApiError && (error.status === 401 || error.status === 426)) {
+          throw error;
+        }
+        failure =
+          error instanceof ApiError
+            ? { code: error.code, message: error.message, offline: error.status === 0 }
+            : { code: 'unknown', message: 'Komut gönderilemedi', offline: false };
         break;
       }
     }
-    return { conflicts, rejected };
+    return { conflicts, rejected, ...(failure ? { failure } : {}) };
   });
 }
 
-export async function dropPendingFor(tripStudentId: string): Promise<void> {
-  await runExclusive(async () => {
+/**
+ * Bir öğrencinin bekleyen komutlarını düşürür ve KAÇ TANE düştüğünü söyler.
+ * Sessizce silmek, şoförün kapıda kaydettiği teslimin yok olması ve bunu
+ * öğrenmesinin hiçbir yolu olmaması demekti.
+ */
+export async function dropPendingFor(tripStudentId: string): Promise<number> {
+  return runExclusive(async () => {
     const pending = memory.filter(
       (item) => item.tripStudentId === tripStudentId && item.status === 'PENDING',
     );
     for (const item of pending) {
       await removeOutboxUnlocked(item.clientEventId);
     }
+    return pending.length;
   });
 }
 
@@ -228,7 +283,9 @@ function coerceItem(value: unknown): OutboxItem | null {
     deviceSeq: Number(row.deviceSeq ?? row.device_seq ?? 0),
     occurredAtDevice: String(row.occurredAtDevice ?? row.occurred_at_device ?? ''),
     status: asStatus(String(row.status ?? 'PENDING')),
-    conflictState: (row.conflictState ?? row.conflict_state ?? undefined) as OutboxItem['conflictState'],
+    conflictState: (row.conflictState ??
+      row.conflict_state ??
+      undefined) as OutboxItem['conflictState'],
     conflictStateSeq: row.conflictStateSeq ?? row.conflict_state_seq ?? undefined,
     rejectReason: row.rejectReason ?? row.reject_reason ?? undefined,
     receiverMembershipId:

@@ -7,7 +7,11 @@ export const UNDO_WINDOW_MS = 10 * 60 * 1000;
 /** Veli durum bildirimi 60–90 sn gecikir; geri alınırsa hiç gitmez. */
 export const GUARDIAN_STATE_HOLD_MS = 75_000;
 
-const UNDOABLE_ACTIONS = ['BOARD', 'MARK_NO_SHOW', 'MARK_DELIVERY_FAILED'] as const satisfies readonly StudentAction[];
+const UNDOABLE_ACTIONS = [
+  'BOARD',
+  'MARK_NO_SHOW',
+  'MARK_DELIVERY_FAILED',
+] as const satisfies readonly StudentAction[];
 
 export type UndoableStudentAction = (typeof UNDOABLE_ACTIONS)[number];
 

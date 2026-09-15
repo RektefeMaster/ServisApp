@@ -9,6 +9,8 @@ import {
   createHolidayInput,
   createInviteInput,
   createRouteInput,
+  updateRouteDepartureInput,
+  updateRouteLifecycleInput,
   createSchoolInput,
   createStaffInput,
   createStopInput,
@@ -135,6 +137,18 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
     return detail;
   });
 
+  app.put('/v1/admin/routes/:routeId/departure', async (request) => {
+    const params = parse(routeIdParams, request.params);
+    const input = parse(updateRouteDepartureInput, request.body);
+    return data.admin.updateRouteDeparture(tenantIdOf(request), params.routeId, input);
+  });
+
+  app.put('/v1/admin/routes/:routeId/status', async (request) => {
+    const params = parse(routeIdParams, request.params);
+    const input = parse(updateRouteLifecycleInput, request.body);
+    return data.admin.updateRouteLifecycle(tenantIdOf(request), params.routeId, input);
+  });
+
   app.post('/v1/admin/routes/:routeId/versions', async (request) => {
     const params = parse(routeIdParams, request.params);
     const input = parse(cloneRouteVersionInput, request.body ?? {});
@@ -206,11 +220,13 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
   });
 
   app.post('/v1/admin/students/:studentId/guardians/:membershipId/revoke', async (request) => {
-    const params = parse(
-      z.object({ studentId: z.uuid(), membershipId: z.uuid() }),
-      request.params,
-    );
+    const params = parse(z.object({ studentId: z.uuid(), membershipId: z.uuid() }), request.params);
     return data.admin.revokeGuardian(tenantIdOf(request), params.studentId, params.membershipId);
+  });
+
+  app.post('/v1/admin/students/:studentId/guardians/:membershipId/restore', async (request) => {
+    const params = parse(z.object({ studentId: z.uuid(), membershipId: z.uuid() }), request.params);
+    return data.admin.restoreGuardian(tenantIdOf(request), params.studentId, params.membershipId);
   });
 
   app.post('/v1/admin/identities/:identityId/phone', async (request) => {
@@ -290,13 +306,23 @@ export function registerAdminRoutes(app: FastifyInstance, data: AppData): void {
   app.post('/v1/admin/trips/:tripId/vehicle', async (request) => {
     const params = parse(z.object({ tripId: z.uuid() }), request.params);
     const input = parse(assignTripVehicleInput, request.body);
-    return data.admin.assignTripVehicle(tenantIdOf(request), adminActor(request), params.tripId, input);
+    return data.admin.assignTripVehicle(
+      tenantIdOf(request),
+      adminActor(request),
+      params.tripId,
+      input,
+    );
   });
 
   app.post('/v1/admin/trips/:tripId/crew', async (request) => {
     const params = parse(z.object({ tripId: z.uuid() }), request.params);
     const input = parse(assignTripCrewInput, request.body);
-    return data.admin.assignTripCrew(tenantIdOf(request), adminActor(request), params.tripId, input);
+    return data.admin.assignTripCrew(
+      tenantIdOf(request),
+      adminActor(request),
+      params.tripId,
+      input,
+    );
   });
 
   app.post('/v1/admin/trip-moves', async (request) => {

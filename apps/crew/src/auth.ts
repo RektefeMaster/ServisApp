@@ -5,19 +5,29 @@ import {
   ApiError,
   devLogin,
   fetchSession,
+  setAccessTokenProvider,
   type CrewSession,
 } from './api/client';
+import { envString } from './env';
 import { deleteSecret, getSecret, setSecret } from './secure-storage';
 
 const SESSION_KEY = 'crew.session';
 const DEVICE_KEY = 'crew.deviceId';
 const LAST_TRIP_KEY = 'crew.lastTripId';
 
+let authClient: ReturnType<typeof createClient> | null = null;
+
+/**
+ * Tek örnek. Her çağrıda yeni istemci kurmak, her birinin kendi yenileme
+ * zamanlayıcısını çalıştırması ve hiçbirinin uygulamanın kullandığı jetonla
+ * ilişkilenmemesi demekti.
+ */
 function createAuthClient(): ReturnType<typeof createClient> | null {
-  const url = process.env['EXPO_PUBLIC_SUPABASE_URL'];
-  const publishableKey = process.env['EXPO_PUBLIC_SUPABASE_ANON_KEY'];
+  if (authClient) return authClient;
+  const url = envString('EXPO_PUBLIC_SUPABASE_URL');
+  const publishableKey = envString('EXPO_PUBLIC_SUPABASE_ANON_KEY');
   if (!url || !publishableKey) return null;
-  return createClient(url, publishableKey, {
+  authClient = createClient(url, publishableKey, {
     auth: {
       storage: {
         getItem: (key) => getSecret(key),
@@ -29,7 +39,15 @@ function createAuthClient(): ReturnType<typeof createClient> | null {
       detectSessionInUrl: false,
     },
   });
+  return authClient;
 }
+
+setAccessTokenProvider(async () => {
+  const client = createAuthClient();
+  if (!client) return null;
+  const { data } = await client.auth.getSession();
+  return data.session?.access_token ?? null;
+});
 
 export async function loadDeviceId(): Promise<string> {
   const stored = await getSecret(DEVICE_KEY);
@@ -139,7 +157,10 @@ async function sessionFromToken(token: string, preferredTenantId?: string): Prom
   return sessionFromMembership(token, snapshot.fullName, membership);
 }
 
-export async function loginWithPassword(email: string, password: string): Promise<PasswordLoginResult> {
+export async function loginWithPassword(
+  email: string,
+  password: string,
+): Promise<PasswordLoginResult> {
   const client = createAuthClient();
   let token: string;
   if (client) {
@@ -189,7 +210,14 @@ export async function restoreSupabaseSession(): Promise<CrewSession | null> {
     const session = await sessionFromToken(access, stored?.tenantId);
     await persistSession(session);
     return session;
-  } catch {
+  } catch (caught) {
+    // Yalnız taşıma hatasında (çevrimdışı) saklı oturuma düşülür. Yetki
+    // kaldırıldıysa (401/403) saklı oturumu döndürmek, üyeliği iptal edilmiş
+    // kişiyi uygulamanın içinde tutuyordu.
+    if (caught instanceof ApiError && caught.status !== 0) {
+      await clearSession();
+      return null;
+    }
     return stored;
   }
 }

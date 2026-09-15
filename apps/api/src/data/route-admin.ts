@@ -3,6 +3,8 @@ import type {
   CreateRouteInput,
   CreateStopInput,
   ReplaceRouteStopsInput,
+  UpdateRouteDepartureInput,
+  UpdateRouteLifecycleInput,
 } from '@servisapp/contracts';
 import {
   evaluateRouteCapacity,
@@ -10,6 +12,7 @@ import {
   exhaustive,
   hasUsableCoordinates,
   isEnrollmentEnded,
+  normalizeDepartureLocalTime,
   suggestWaypointOrder,
   ymdInTimeZone,
   type RoutePlanIssue,
@@ -32,8 +35,9 @@ import {
 } from '@servisapp/db';
 import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { badRequest, conflict, HttpError, notFound } from '../http-error.js';
+import { reconcileOpenTripsTx } from './trip-reconcile.js';
 import { mapDbError } from './db-error.js';
-import type { RouteAdminPort, RouteVersionView } from './ports.js';
+import type { RouteAdminPort, RouteDetail, RouteVersionView } from './ports.js';
 
 export function createRouteAdminPort(db: Database): RouteAdminPort {
   return {
@@ -95,6 +99,10 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
             segment: input.segment,
             shiftNo: input.shiftNo,
             maxDetourM: input.maxDetourM,
+            departureLocalTime: normalizeDepartureLocalTime(
+              input.departureLocalTime,
+              input.segment,
+            ),
           })
           .returning({ id: route.id });
         if (!created) throw new HttpError(500, 'insert_failed', 'Rota kaydedilemedi');
@@ -123,6 +131,8 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
             schoolId: route.schoolId,
             segment: route.segment,
             shiftNo: route.shiftNo,
+            departureLocalTime: route.departureLocalTime,
+            retiredAt: route.retiredAt,
           })
           .from(route);
         const versions = await tx
@@ -146,6 +156,8 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
             schoolId: item.schoolId,
             segment: item.segment,
             shiftNo: item.shiftNo,
+            departureLocalTime: item.departureLocalTime,
+            retiredAt: item.retiredAt ? item.retiredAt.toISOString() : null,
             publishedVersionId: published?.id ?? null,
             draftVersionId: draft?.id ?? null,
           };
@@ -154,40 +166,54 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
     },
 
     getRoute(tenantId, routeId) {
+      return withAdmin(db, tenantId, (tx) => loadRouteDetail(tx, tenantId, routeId));
+    },
+
+    updateRouteDeparture(tenantId, routeId, input: UpdateRouteDepartureInput) {
       return withAdmin(db, tenantId, async (tx) => {
-        const [item] = await tx
-          .select({
-            id: route.id,
-            vehicleId: route.vehicleId,
-            schoolId: route.schoolId,
-            segment: route.segment,
-            shiftNo: route.shiftNo,
-            maxDetourM: route.maxDetourM,
-          })
+        const [owned] = await tx
+          .select({ id: route.id, segment: route.segment })
           .from(route)
-          .where(and(eq(route.id, routeId), eq(route.tenantId, tenantId)));
-        if (!item) return null;
-
-        const versions = await tx
-          .select({
-            id: routeVersion.id,
-            versionNo: routeVersion.versionNo,
-            status: routeVersion.status,
-            effectiveFrom: routeVersion.effectiveFrom,
+          .where(and(eq(route.id, routeId), eq(route.tenantId, tenantId)))
+          .for('update');
+        if (!owned) throw notFound('Rota bulunamadı');
+        await tx
+          .update(route)
+          .set({
+            departureLocalTime: normalizeDepartureLocalTime(
+              input.departureLocalTime,
+              owned.segment,
+            ),
           })
-          .from(routeVersion)
-          .where(and(eq(routeVersion.routeId, routeId), eq(routeVersion.tenantId, tenantId)))
-          .orderBy(asc(routeVersion.versionNo));
+          .where(and(eq(route.id, routeId), eq(route.tenantId, tenantId)));
+        // Kalkış saati yalnız ekran bilgisi değil: baseline, personel geçerliliği
+        // ve otomatik kapanış buna bakar. Üretilmiş seferler yeni saate çekilir.
+        await reconcileOpenTripsTx(tx, tenantId, { routeIds: [routeId] });
+        const detail = await loadRouteDetail(tx, tenantId, routeId);
+        if (!detail) throw notFound('Rota bulunamadı');
+        return detail;
+      });
+    },
 
-        return {
-          ...item,
-          versions: versions.map((version) => ({
-            id: version.id,
-            versionNo: version.versionNo,
-            status: version.status,
-            effectiveFrom: dateOnly(version.effectiveFrom),
-          })),
-        };
+    updateRouteLifecycle(tenantId, routeId, input: UpdateRouteLifecycleInput) {
+      return withAdmin(db, tenantId, async (tx) => {
+        const [owned] = await tx
+          .select({ id: route.id, retiredAt: route.retiredAt })
+          .from(route)
+          .where(and(eq(route.id, routeId), eq(route.tenantId, tenantId)))
+          .for('update');
+        if (!owned) throw notFound('Rota bulunamadı');
+        const retiring = input.status === 'RETIRED';
+        await tx
+          .update(route)
+          .set({ retiredAt: retiring ? (owned.retiredAt ?? new Date()) : null })
+          .where(and(eq(route.id, routeId), eq(route.tenantId, tenantId)));
+        // Emekliye ayrılan güzergâhın henüz başlamamış seferleri iptal edilir;
+        // geri açılan güzergâh ise yeniden plana çekilir.
+        await reconcileOpenTripsTx(tx, tenantId, { routeIds: [routeId] });
+        const detail = await loadRouteDetail(tx, tenantId, routeId);
+        if (!detail) throw notFound('Rota bulunamadı');
+        return detail;
       });
     },
 
@@ -245,6 +271,7 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
         const ctx = await requireDraft(tx, tenantId, versionId);
         const view = await loadVersionView(tx, tenantId, versionId);
         if (!view) throw notFound('Rota sürümü bulunamadı');
+        await assertRouteActive(tx, tenantId, ctx.routeId);
 
         const plan = evaluateRoutePlan(view.segment, toPlanStops(view));
         if (!plan.ok) throw routePlanHttpError(plan.issue);
@@ -289,6 +316,11 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
           .update(routeVersion)
           .set({ status: 'PUBLISHED' })
           .where(and(eq(routeVersion.id, versionId), eq(routeVersion.tenantId, tenantId)));
+
+        // Ufuk 7 gün önden üretildiği için yarının seferi eski sürümle durabilir.
+        // Yayın, henüz başlamamış seferleri yeni plana çeker; başlamış sefer
+        // dokunulmadan seferin olay akışına düşülür.
+        await reconcileOpenTripsTx(tx, tenantId, { routeIds: [ctx.routeId] });
 
         const published = await loadVersionView(tx, tenantId, versionId);
         if (!published) throw new HttpError(500, 'insert_failed', 'Yayınlanan sürüm okunamadı');
@@ -357,6 +389,60 @@ export function createRouteAdminPort(db: Database): RouteAdminPort {
         return created;
       });
     },
+  };
+}
+
+/** Emekli güzergâha yeni sürüm yayınlanamaz. */
+async function assertRouteActive(tx: Database, tenantId: string, routeId: string): Promise<void> {
+  const [row] = await tx
+    .select({ retiredAt: route.retiredAt })
+    .from(route)
+    .where(and(eq(route.id, routeId), eq(route.tenantId, tenantId)));
+  if (row?.retiredAt) {
+    throw conflict('route_retired', 'Emekli güzergâha yeni sürüm yayınlanamaz');
+  }
+}
+
+async function loadRouteDetail(
+  tx: Database,
+  tenantId: string,
+  routeId: string,
+): Promise<RouteDetail | null> {
+  const [item] = await tx
+    .select({
+      id: route.id,
+      vehicleId: route.vehicleId,
+      schoolId: route.schoolId,
+      segment: route.segment,
+      shiftNo: route.shiftNo,
+      maxDetourM: route.maxDetourM,
+      departureLocalTime: route.departureLocalTime,
+      retiredAt: route.retiredAt,
+    })
+    .from(route)
+    .where(and(eq(route.id, routeId), eq(route.tenantId, tenantId)));
+  if (!item) return null;
+
+  const versions = await tx
+    .select({
+      id: routeVersion.id,
+      versionNo: routeVersion.versionNo,
+      status: routeVersion.status,
+      effectiveFrom: routeVersion.effectiveFrom,
+    })
+    .from(routeVersion)
+    .where(and(eq(routeVersion.routeId, routeId), eq(routeVersion.tenantId, tenantId)))
+    .orderBy(asc(routeVersion.versionNo));
+
+  return {
+    ...item,
+    retiredAt: item.retiredAt ? item.retiredAt.toISOString() : null,
+    versions: versions.map((version) => ({
+      id: version.id,
+      versionNo: version.versionNo,
+      status: version.status,
+      effectiveFrom: dateOnly(version.effectiveFrom),
+    })),
   };
 }
 

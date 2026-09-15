@@ -20,6 +20,7 @@ docker compose up -d                  # Postgres 17 (üretimdeki Supabase ile ay
 cp .env.development.example .env
 pnpm db:migrate                       # şema, RLS, fonksiyonlar
 pnpm db:bootstrap-roles               # servisapp_api / servisapp_worker parolaları
+pnpm db:platform -- --dev-login=true   # yerel e-posta/parola girişi (üretimde KAPALI)
 pnpm --filter @servisapp/api dev
 pnpm --filter @servisapp/api dev:worker   # kuyruk (ayrı süreç)
 curl localhost:3000/health/ready          # {"status":"ok"}
@@ -31,6 +32,10 @@ curl localhost:3000/health/ready          # {"status":"ok"}
 Üretim ortamı için `.env.example` kullanılır; parolalar ve kriptografik sırlar
 Fly secret olarak tutulur, repoya girmez. İstemciler yalnız publishable/anon anahtar
 görür; `service_role` tarayıcıya ve telefona girmez.
+
+Mobil yayın derlemelerinde `EXPO_PUBLIC_*` değişkenleri EAS ortamından gelir
+(`docs/store-submission.md`). Supabase Auth'un jetonda taşıdığı telefon iddiası
+kimlik bağlamanın tek yoludur — devreye alma kontrolü `docs/operations.md`.
 
 ## Komutlar
 
@@ -44,10 +49,10 @@ görür; `service_role` tarayıcıya ve telefona girmez.
 | `pnpm lint`               | ESLint                                                       |
 | `pnpm test`               | Birim + entegrasyon testleri                                 |
 | `pnpm db:bootstrap-roles` | Uygulama rollerini oluşturur (idempotent, parolalar env'den) |
-| `pnpm db:platform`        | Kill switch / min app sürümü (`--kill-gps=true` …)           |
+| `pnpm db:platform`        | Kill switch / min sürüm / dev-login (`--kill-gps=true` …)    |
 | `pnpm db:generate`        | Şemadan migration üretir                                     |
 | `pnpm db:migrate`         | Migration'ları uygular (doğrudan bağlantı; hosted'a değil)   |
-| `pnpm db:seed`            | Yerel demo tohumu                                            |
+| `pnpm db:seed`            | Yerel demo tohumu (uzak host için `-- --allow-remote`)       |
 
 ## Yapı
 

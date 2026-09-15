@@ -30,7 +30,15 @@ export function canResendOtp(resendCount: number): boolean {
  * `arrivedAt` doluysa araç o durağa vardı.
  */
 export function criticalAlertAutoDropped(input: {
-  tripState: 'PLANNED' | 'READY' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED' | 'SUSPENDED' | 'ABORTED' | 'AUTO_CLOSED';
+  tripState:
+    | 'PLANNED'
+    | 'READY'
+    | 'ACTIVE'
+    | 'COMPLETED'
+    | 'CANCELLED'
+    | 'SUSPENDED'
+    | 'ABORTED'
+    | 'AUTO_CLOSED';
   stopArrivedAt: Date | null;
 }): boolean {
   switch (input.tripState) {
@@ -51,12 +59,18 @@ export function criticalAlertAutoDropped(input: {
 }
 
 /** Veli "bugün binmeyecek"i geri alınca yalnız planlı yokluk beklenene döner. */
-export function reconcileCancelRideException(currentState: StudentState): {
-  kind: 'APPLY';
-  nextState: 'EXPECTED';
-} | { kind: 'IGNORE'; reason: 'OPERATIONAL_FACT_WINS' } {
+export function reconcileCancelRideException(currentState: StudentState):
+  | {
+      kind: 'APPLY';
+      nextState: 'EXPECTED';
+    }
+  | { kind: 'IGNORE'; reason: 'OPERATIONAL_FACT_WINS' } {
   if (currentState === 'ABSENT_PLANNED') return { kind: 'APPLY', nextState: 'EXPECTED' };
-  if (isOperationalFact(currentState) || currentState === 'NO_SHOW' || currentState === 'MOVED_OUT') {
+  if (
+    isOperationalFact(currentState) ||
+    currentState === 'NO_SHOW' ||
+    currentState === 'MOVED_OUT'
+  ) {
     return { kind: 'IGNORE', reason: 'OPERATIONAL_FACT_WINS' };
   }
   return { kind: 'IGNORE', reason: 'OPERATIONAL_FACT_WINS' };

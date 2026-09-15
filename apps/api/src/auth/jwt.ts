@@ -89,13 +89,54 @@ export async function verifyAccessToken(token: string, input: JwtVerifyInput): P
   }
 }
 
-function emailVerified(payload: JWTPayload): boolean {
-  // user_metadata GoTrue'da kullanıcı tarafından yazılabilir; yetki kararı olmaz.
-  return payload['email_verified'] === true || payload['email_confirmed'] === true;
+/**
+ * Üst seviye doğrulama bayrağı. `user_metadata` OKUNMAZ: GoTrue orayı
+ * `updateUser({ data })` ile kullanıcıya yazdırır, yetki kararı olamaz.
+ * Bayrak hiç yoksa `null` döner — karar çağırana kalır.
+ */
+function verifiedFlag(payload: JWTPayload, keys: readonly string[]): boolean | null {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'boolean') return value;
+  }
+  return null;
 }
 
+/**
+ * E-posta yalnız AÇIK bir üst seviye bayrakla kabul edilir.
+ *
+ * Telefondan farkı şu: Supabase'te "Confirm email" kapalıyken `signUp` sahipliği
+ * hiç kanıtlanmamış bir e-postayla anında oturum verir. Bu yüzden e-postada
+ * varsayılan "hayır"dır; iddia ancak Custom Access Token Hook üst seviyeye
+ * `email_verified` koyduğunda taşınır.
+ */
+function emailVerified(payload: JWTPayload): boolean {
+  return verifiedFlag(payload, ['email_verified', 'email_confirmed']) === true;
+}
+
+/**
+ * Telefon iddiası.
+ *
+ * Supabase'in ürettiği erişim jetonunda ÜST SEVİYE `phone_verified` iddiası
+ * YOKTUR (bkz. Supabase "JWT Fields" referansı: zorunlu iddialar iss/aud/exp/
+ * iat/sub/role/aal/session_id/email/phone/is_anonymous). Doğrulama bayrağı
+ * yalnız `user_metadata` içindedir ve orası güvenilmezdir. Bayrağı şart koşmak,
+ * gerçek Supabase jetonuyla telefonu HER ZAMAN null bırakıyordu; kimlik bağlama
+ * (`resolve_session`) ve veli davet aktivasyonu telefona dayandığı için üretimde
+ * hiç kimse giremiyordu.
+ *
+ * Güvenilir sinyal üst seviye `phone` iddiasının kendisidir: GoTrue
+ * `users.phone` kolonunu yalnız doğrulama tamamlandığında doldurur; doğrulanmamış
+ * numara `phone_change` kolonunda bekler ve jetona düşmez. Doğrulanmamış
+ * telefonla oturum da açılamaz — SMS kodu girilmeden token verilmez.
+ *
+ * Custom Access Token Hook üst seviyeye açık bir bayrak koyuyorsa o bayrak
+ * bağlayıcıdır: `false` ise telefon reddedilir.
+ */
 function phoneVerified(payload: JWTPayload): boolean {
-  return payload['phone_verified'] === true || payload['phone_confirmed'] === true;
+  const flag = verifiedFlag(payload, ['phone_verified', 'phone_confirmed']);
+  if (flag !== null) return flag;
+  return stringClaim(payload['phone']) !== null;
 }
 
 function e164Phone(value: string | null): string | null {

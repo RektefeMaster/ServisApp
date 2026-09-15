@@ -1,7 +1,8 @@
+import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
-import { colors } from '@servisapp/ui';
+import { colors, useManifestFonts } from '@servisapp/ui';
 import type { CrewSession } from './src/api/client';
 import { clearSession, restoreSupabaseSession } from './src/auth';
 import { openOutbox } from './src/outbox';
@@ -12,6 +13,15 @@ import { TripScreen } from './src/screens/TripScreen';
 type Route = { name: 'login' } | { name: 'today' } | { name: 'trip'; tripId: string };
 
 export default function App() {
+  return (
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+      <AppContent />
+    </SafeAreaProvider>
+  );
+}
+
+function AppContent() {
+  const fontsLoaded = useManifestFonts();
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState<CrewSession | null>(null);
   const [route, setRoute] = useState<Route>({ name: 'login' });
@@ -28,11 +38,11 @@ export default function App() {
     })();
   }, []);
 
-  if (!ready) {
+  if (!ready || !fontsLoaded) {
     return (
       <View style={styles.boot}>
-        <ActivityIndicator color={colors.headlamp} />
-        <StatusBar style="light" />
+        <ActivityIndicator color={colors.rail} />
+        <StatusBar style="dark" />
       </View>
     );
   }
@@ -46,7 +56,7 @@ export default function App() {
             setRoute({ name: 'today' });
           }}
         />
-        <StatusBar style="light" />
+        <StatusBar style="dark" />
       </>
     );
   }
@@ -64,7 +74,7 @@ export default function App() {
             setRoute({ name: 'login' });
           }}
         />
-        <StatusBar style="light" />
+        <StatusBar style="dark" />
       </>
     );
   }
@@ -85,7 +95,7 @@ export default function App() {
           setRoute({ name: 'login' });
         }}
       />
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
     </>
   );
 }
@@ -93,7 +103,7 @@ export default function App() {
 const styles = StyleSheet.create({
   boot: {
     flex: 1,
-    backgroundColor: colors.asphalt,
+    backgroundColor: colors.mist,
     alignItems: 'center',
     justifyContent: 'center',
   },

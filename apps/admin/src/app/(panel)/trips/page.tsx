@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/session';
+import { tripStateLabel } from '@/lib/labels';
 
 function todayYmd(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
@@ -24,20 +25,33 @@ export default function TripsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Tarih ileri geri gezilirken yavaş yanıt yenisini ezebiliyordu: başlık
+    // 20 Eylül'ü gösterirken liste 13 Eylül'ün seferleri oluyordu.
+    let cancelled = false;
     void apiFetch<{ items: TripRow[] }>(`/v1/admin/trips?date=${date}`)
       .then((body) => {
+        if (cancelled) return;
         setItems(body.items);
         setError(null);
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : 'Okunamadı'));
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        setError(caught instanceof Error ? caught.message : 'Okunamadı');
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [date]);
 
   async function generate() {
     try {
-      const body = await apiFetch<{ created: number; skipped: number }>('/v1/admin/trips/generate', {
-        method: 'POST',
-        body: JSON.stringify({ fromDate: date }),
-      });
+      const body = await apiFetch<{ created: number; skipped: number }>(
+        '/v1/admin/trips/generate',
+        {
+          method: 'POST',
+          body: JSON.stringify({ fromDate: date }),
+        },
+      );
       setMessage(`${body.created} sefer üretildi, ${body.skipped} atlandı`);
       const listed = await apiFetch<{ items: TripRow[] }>(`/v1/admin/trips?date=${date}`);
       setItems(listed.items);
@@ -54,9 +68,13 @@ export default function TripsPage() {
           type="date"
           value={date}
           onChange={(event) => setDate(event.target.value)}
-          className="rounded border border-rule bg-white px-2 py-1 text-sm"
+          className="rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
         />
-        <button type="button" className="rounded bg-ink px-3 py-1 text-sm text-paper" onClick={() => void generate()}>
+        <button
+          type="button"
+          className="rounded bg-ink px-3 py-1 text-sm text-paper"
+          onClick={() => void generate()}
+        >
           Ufuk üret
         </button>
       </div>
@@ -66,7 +84,7 @@ export default function TripsPage() {
         {items.map((item) => (
           <li key={item.id} className="px-4 py-3 text-sm">
             <Link href={`/trips/${item.id}`} className="underline">
-              {item.plate} · {item.schoolName} · {item.state}
+              {item.plate} · {item.schoolName} · {tripStateLabel(item.state)}
             </Link>
           </li>
         ))}

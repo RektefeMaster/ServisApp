@@ -26,6 +26,7 @@ function mergeInvariants(worlds: readonly SimWorld[]): Record<string, boolean> {
     'no_on_board_at_complete',
     'unique_student_rows',
     'no_unverified_temp_delivery',
+    'no_guardianless_handover',
     'event_append_only',
     'broadcast_not_times_parents',
   ] as const;

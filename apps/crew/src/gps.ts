@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import type { TripDetail } from '@servisapp/contracts';
-import {
-  gpsWatchdog,
-  gpsWatchdogCrewMessage,
-  type GpsWatchdogState,
-} from '@servisapp/domain';
+import { gpsWatchdog, gpsWatchdogCrewMessage, type GpsWatchdogState } from '@servisapp/domain';
 import * as Location from 'expo-location';
 import { fetchConfig, type CrewSession } from './api/client';
 import {
@@ -29,15 +25,23 @@ export function useTripGps(
     epochRef.current = detail?.locationSessionEpoch ?? 0;
   }, [detail?.locationSessionEpoch]);
 
+  const tripId = detail?.id ?? null;
+  const tripState = detail?.state ?? null;
+
   useEffect(() => {
-    if (!detail || detail.state !== 'ACTIVE') {
+    // detail henüz yüklenmediyse HİÇBİR ŞEYE dokunma. Uygulama sefer ortasında
+    // öldürülüp yeniden açıldığında arka plan konumu akmaya devam ediyor;
+    // "bilinmiyor" hâlini "sefer aktif değil" sayıp kapatmak, tünelde yeniden
+    // yüklenemeyen bir ekranda canlı takibi kalıcı olarak öldürüyordu.
+    if (tripId === null || tripState === null) return;
+    if (tripState !== 'ACTIVE') {
       setMessage(null);
       void stopBackgroundTripGps();
       void clearGpsContext();
       return;
     }
-    const tripId = detail.id;
     stoppedRef.current = false;
+    let backgroundAllowed = false;
     let subscription: Location.LocationSubscription | null = null;
     let watchdogTimer: ReturnType<typeof setInterval> | undefined;
     void persistGpsContext({ tripId, sessionEpoch: epochRef.current });
@@ -47,6 +51,13 @@ export function useTripGps(
       setMessage(reason);
       subscription?.remove();
       subscription = null;
+      // Bekçi de durur. Yoksa 30 saniye sonra "Konum alınamıyor" yazıp gerçek
+      // sebebi (örn. canlı konumu başka cihaz devraldı) ekrandan siliyordu;
+      // şoför kenara çekip sapasağlam konum servisini kurcalıyordu.
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = undefined;
+      }
       void stopBackgroundTripGps();
     }
 
@@ -59,7 +70,16 @@ export function useTripGps(
     }
 
     function onAppState(next: AppStateStatus): void {
-      if (next === 'active') void refreshWatchdog();
+      if (next === 'active') {
+        void refreshWatchdog();
+        // Uygulama öndeyken `watchPositionAsync` zaten akıyor; arka plan görevi
+        // de sürerse aynı sefer için iki bağımsız konum akışı olur. Şoförün
+        // navigasyon için de kullandığı telefonda bu tur boyunca ana pil
+        // maliyetidir.
+        void stopBackgroundTripGps();
+        return;
+      }
+      if (backgroundAllowed) void startBackgroundTripGps().catch(() => undefined);
     }
 
     const appSub = AppState.addEventListener('change', onAppState);
@@ -72,14 +92,12 @@ export function useTripGps(
           return;
         }
         const permission = await Location.requestForegroundPermissionsAsync();
-        if (permission.status !== 'granted') {
+        if (permission.status !== Location.PermissionStatus.GRANTED) {
           stop('Konum izni gerekli');
           return;
         }
         const background = await Location.requestBackgroundPermissionsAsync();
-        if (background.status === 'granted') {
-          await startBackgroundTripGps().catch(() => undefined);
-        }
+        backgroundAllowed = background.status === Location.PermissionStatus.GRANTED;
         subscription = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.Balanced,
@@ -122,7 +140,7 @@ export function useTripGps(
       appSub.remove();
       void stopBackgroundTripGps();
     };
-  }, [detail?.id, detail?.state, session]);
+  }, [tripId, tripState, session]);
 
   return { message };
 }

@@ -91,8 +91,8 @@ export async function insertWorld(sql: postgres.Sql): Promise<World> {
       (${studentB}, ${tenantB}, ${schoolB}, 'Can Demir', 'GUARDIAN_REQUIRED', '2026-09-01')
   `;
   await sql`
-    insert into route (id, tenant_id, vehicle_id, school_id, segment, shift_no) values
-      (${routeA}, ${tenantA}, ${vehicleA}, ${schoolA}, 'MORNING', 1)
+    insert into route (id, tenant_id, vehicle_id, school_id, segment, shift_no, departure_local_time) values
+      (${routeA}, ${tenantA}, ${vehicleA}, ${schoolA}, 'MORNING', 1, '07:00')
   `;
   await sql`
     insert into route_version (id, tenant_id, route_id, version_no, status, effective_from) values

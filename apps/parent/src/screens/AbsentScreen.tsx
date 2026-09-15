@@ -1,8 +1,28 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import type { ParentDayPlan } from '@servisapp/contracts';
-import { colors, space } from '@servisapp/ui';
-import { ApiError, cancelRideException, createRideException, fetchDayPlan, type ParentSession } from '../api/client';
+import {
+  AppText,
+  SectionHeading,
+  FlowHeader,
+  ResultCard,
+  AppIcon,
+  Button,
+  IconButton,
+  InlineAlert,
+  Screen,
+  colors,
+  radius,
+  space,
+  useHardwareBack,
+} from '@servisapp/ui';
+import {
+  ApiError,
+  cancelRideException,
+  createRideException,
+  fetchDayPlan,
+  type ParentSession,
+} from '../api/client';
 
 function todayIstanbul(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
@@ -22,15 +42,23 @@ export function AbsentScreen({
   onSessionInvalid: () => void;
 }) {
   const [plan, setPlan] = useState<ParentDayPlan | null>(null);
-  const [morning, setMorning] = useState(true);
+  const [morning, setMorning] = useState(false);
   const [evening, setEvening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const lock = useRef(false);
+  useHardwareBack(() => {
+    if (!busy) onBack();
+  });
 
   const reload = useCallback(async () => {
     try {
       const next = await fetchDayPlan(session, studentId);
       setPlan(next);
+      setMorning(false);
+      setEvening(false);
       setError(null);
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
@@ -47,104 +75,246 @@ export function AbsentScreen({
 
   async function submit() {
     const segments: Array<'MORNING' | 'AFTERNOON'> = [];
-    if (morning) segments.push('MORNING');
-    if (evening) segments.push('AFTERNOON');
+    if (morning && !plan?.morningAbsent) segments.push('MORNING');
+    if (evening && !plan?.eveningAbsent) segments.push('AFTERNOON');
     if (segments.length === 0) {
       setError('En az bir sefer seç');
       return;
     }
+    if (lock.current) return;
+    lock.current = true;
     setBusy(true);
+    setError(null);
+    setNotice(null);
     try {
       await createRideException(session, {
         studentId,
         serviceDate: todayIstanbul(),
         segments,
       });
-      await reload();
-      onBack();
+      setSaved(segments.map((segment) => (segment === 'MORNING' ? 'Sabah' : 'Akşam')).join(' ve '));
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'İstisna kaydedilemedi');
+      if (caught instanceof ApiError && caught.status === 401) onSessionInvalid();
+      else
+        setError(
+          caught instanceof ApiError ? caught.message : 'Bildirim gönderilemedi. Yeniden dene.',
+        );
     } finally {
+      lock.current = false;
       setBusy(false);
     }
   }
 
   async function cancel(exceptionId: string) {
+    if (lock.current) return;
+    lock.current = true;
     setBusy(true);
+    setError(null);
+    setNotice(null);
     try {
       await cancelRideException(session, exceptionId);
-      await reload();
+      setPlan((current) =>
+        current
+          ? {
+              ...current,
+              morningAbsent:
+                current.morningExceptionId === exceptionId ? false : current.morningAbsent,
+              morningExceptionId:
+                current.morningExceptionId === exceptionId ? null : current.morningExceptionId,
+              eveningAbsent:
+                current.eveningExceptionId === exceptionId ? false : current.eveningAbsent,
+              eveningExceptionId:
+                current.eveningExceptionId === exceptionId ? null : current.eveningExceptionId,
+            }
+          : current,
+      );
+      setNotice('Bildirim geri alındı. Güncel servis planı uygulanacak.');
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'İptal edilemedi');
+      if (caught instanceof ApiError && caught.status === 401) onSessionInvalid();
+      else setError(caught instanceof ApiError ? caught.message : 'İptal edilemedi');
     } finally {
+      lock.current = false;
       setBusy(false);
     }
   }
 
+  if (saved)
+    return (
+      <Screen scroll footer={<Button label="Çocuğun planına dön" onPress={onBack} />}>
+        <FlowHeader
+          title="Bildirim gönderildi"
+          context={studentName}
+          icon="calendar"
+          description="Bugünün servis planı güncellendi."
+        />
+        <ResultCard
+          title="Servis ekibine haber verildi"
+          body={`${studentName} bugün ${saved.toLocaleLowerCase('tr-TR')} seferini kullanmayacak. Bildirimi çocuğun planından geri alabilirsin.`}
+        />
+      </Screen>
+    );
+
   if (!plan) {
     return (
-      <View style={styles.screen}>
-        <ActivityIndicator color={colors.headlamp} />
-      </View>
+      <Screen>
+        <IconButton label="← Çocuğun planı" disabled={busy} onPress={onBack} style={styles.back} />
+        {error ? (
+          <>
+            <InlineAlert title={error} tone="danger" />
+            <Button label="Tekrar dene" onPress={() => void reload()} variant="secondary" />
+          </>
+        ) : (
+          <ActivityIndicator color={colors.rail} />
+        )}
+      </Screen>
     );
   }
 
   return (
-    <View style={styles.screen}>
-      <Pressable onPress={onBack}>
-        <Text style={styles.back}>← Çocuk</Text>
-      </Pressable>
-      <Text style={styles.title}>Bugün kullanmayacak</Text>
-      <Text style={styles.lede}>{studentName} için yalnız bugün. Araçtaysa teslim akışına gider.</Text>
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-      <Pressable onPress={() => setMorning((value) => !value)} style={styles.row}>
-        <Text style={styles.rowText}>Sabah {morning ? '• seçili' : ''}</Text>
-      </Pressable>
-      <Pressable onPress={() => setEvening((value) => !value)} style={styles.row}>
-        <Text style={styles.rowText}>Akşam {evening ? '• seçili' : ''}</Text>
-      </Pressable>
+    <Screen
+      scroll
+      footer={
+        <>
+          <AppText preset="caption">Seçimin yalnızca bugün için geçerli.</AppText>
+          <Button
+            label="Servise haber ver"
+            disabled={!morning && !evening}
+            onPress={() => void submit()}
+            loading={busy}
+          />
+        </>
+      }
+    >
+      <IconButton label="← Çocuğun planı" disabled={busy} onPress={onBack} style={styles.back} />
+      <FlowHeader
+        title="Bugün kullanmayacak"
+        context={studentName}
+        icon="calendar"
+        description="Kullanılmayacak seferi seç; servis ekibine hemen haber verelim."
+      />
+      {notice ? <InlineAlert title={notice} tone="ok" /> : null}
+      {error ? <InlineAlert title={error} tone="danger" /> : null}
+
+      <SectionHeading title="Hangi seferi kullanmayacak?" />
+      <SegmentToggle
+        label="Sabah"
+        selected={morning || plan.morningAbsent}
+        sent={plan.morningAbsent}
+        disabled={busy || plan.morningAbsent}
+        onPress={() => setMorning((value) => !value)}
+      />
+      <SegmentToggle
+        label="Akşam"
+        selected={evening || plan.eveningAbsent}
+        sent={plan.eveningAbsent}
+        disabled={busy || plan.eveningAbsent}
+        onPress={() => setEvening((value) => !value)}
+      />
+
       {plan.morningExceptionId ? (
-        <Pressable
+        <Button
+          label="Sabah bildirimini geri al"
+          variant="ghost"
           disabled={busy}
           onPress={() => void cancel(plan.morningExceptionId ?? '')}
-          style={styles.secondary}
-        >
-          <Text style={styles.secondaryText}>Sabah istisnasını geri al</Text>
-        </Pressable>
+          style={styles.undo}
+        />
       ) : null}
       {plan.eveningExceptionId ? (
-        <Pressable
+        <Button
+          label="Akşam bildirimini geri al"
+          variant="ghost"
           disabled={busy}
           onPress={() => void cancel(plan.eveningExceptionId ?? '')}
-          style={styles.secondary}
-        >
-          <Text style={styles.secondaryText}>Akşam istisnasını geri al</Text>
-        </Pressable>
+          style={styles.undo}
+        />
       ) : null}
-      <Pressable disabled={busy} onPress={() => void submit()} style={styles.cta}>
-        <Text style={styles.ctaText}>{busy ? 'Kaydediliyor…' : 'Kaydet'}</Text>
-      </Pressable>
-    </View>
+    </Screen>
+  );
+}
+
+function SegmentToggle({
+  label,
+  selected,
+  sent,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  sent?: boolean;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={[styles.row, selected ? styles.rowSelected : null]}
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked: selected, disabled: Boolean(disabled) }}
+    >
+      <AppIcon name={label === 'Sabah' ? 'sun' : 'home'} />
+      <View style={{ flex: 1, gap: 4 }}>
+        <AppText preset="section">{label}</AppText>
+        <AppText preset="meta">
+          {sent
+            ? 'Servise bildirildi · aşağıdan geri alabilirsin'
+            : label === 'Sabah'
+              ? 'Okula gidiş'
+              : 'Eve dönüş'}
+        </AppText>
+      </View>
+      <View style={[styles.check, selected && styles.checkSelected]}>
+        <AppText color={colors.paper}>{selected ? '✓' : ''}</AppText>
+      </View>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.asphalt, padding: space.lg, paddingTop: 56 },
-  back: { color: colors.headlamp, marginBottom: space.md },
-  title: { color: colors.paper, fontSize: 28, fontWeight: '800' },
-  lede: { color: colors.muted, marginTop: 6, marginBottom: space.lg },
-  error: { color: colors.danger, marginBottom: space.md },
-  row: { backgroundColor: colors.steel, borderRadius: 12, padding: space.md, marginBottom: space.sm },
-  rowText: { color: colors.paper, fontWeight: '700' },
-  cta: {
-    backgroundColor: colors.headlamp,
-    borderRadius: 16,
-    minHeight: 52,
+  back: {
+    alignSelf: 'flex-start',
+    marginBottom: space.xs,
+    paddingHorizontal: 0,
+  },
+  lede: {
+    marginTop: space.xxs,
+    marginBottom: space.lg,
+  },
+  row: {
+    backgroundColor: colors.paper,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: space.md,
+    marginBottom: space.sm,
+    minHeight: 100,
+    gap: 14,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  check: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.paper,
+  },
+  checkSelected: { backgroundColor: colors.rail, borderColor: colors.rail },
+  rowSelected: {
+    borderColor: colors.rail,
+    backgroundColor: colors.railSoft,
+  },
+  undo: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 0,
+  },
+  submit: {
     marginTop: space.lg,
   },
-  ctaText: { color: colors.asphalt, fontWeight: '800' },
-  secondary: { marginTop: space.sm, alignItems: 'center', padding: space.md },
-  secondaryText: { color: colors.headlamp, fontWeight: '700' },
 });

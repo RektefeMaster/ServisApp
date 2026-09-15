@@ -2,12 +2,13 @@
   "expo": {
     "name": "ServisApp Personel",
     "slug": "servisapp-crew",
-    "version": "0.0.0",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "light",
     "scheme": "servisapp-crew",
     "plugins": [
+      "expo-font",
       "expo-task-manager",
       "expo-sqlite",
       "expo-secure-store",
@@ -31,7 +32,7 @@
     "android": {
       "package": "app.servisapp.crew",
       "adaptiveIcon": {
-        "backgroundColor": "#0F172A",
+        "backgroundColor": "#EEF1F5",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -40,6 +41,9 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "splash": {
+      "backgroundColor": "#EEF1F5"
     }
   }
 }

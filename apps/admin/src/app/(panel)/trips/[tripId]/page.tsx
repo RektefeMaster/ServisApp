@@ -3,6 +3,7 @@
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { apiFetch } from '@/lib/session';
+import { segmentLabel, studentStateLabel, tripStateLabel } from '@/lib/labels';
 
 interface LivePoint {
   lat: number;
@@ -51,6 +52,7 @@ interface TripDetail {
 interface OverrideRow {
   id: string;
   studentId: string;
+  serviceDate: string;
   status: string;
 }
 
@@ -103,7 +105,7 @@ function toPercent(
   };
 }
 
-function LiveSchematic({ trip }: { trip: TripDetail }) {
+function LiveSchematic({ trip, stale }: { trip: TripDetail; stale: boolean }) {
   const points = useMemo(() => {
     const next: Array<{ lat: number; lng: number }> = trip.stops.map((stop) => ({
       lat: stop.lat,
@@ -146,11 +148,13 @@ function LiveSchematic({ trip }: { trip: TripDetail }) {
         </span>
       ) : null}
       <p className="absolute bottom-2 left-3 right-3 text-xs text-paper/80">
-        {trip.live
-          ? trip.live.isStale
-            ? 'Konum gecikti; eski nokta canlı gibi gösterilmez.'
-            : `Canlı · ${new Date(trip.live.recordedAt).toLocaleTimeString('tr-TR')}`
-          : 'Araçtan konum yok. Yan menüde ayrı harita maddesi yoktur.'}
+        {stale
+          ? 'Panel sunucudan güncelleme alamıyor; bu görüntü eski.'
+          : trip.live
+            ? trip.live.isStale
+              ? 'Konum gecikti; eski nokta canlı gibi gösterilmez.'
+              : `Canlı · ${new Date(trip.live.recordedAt).toLocaleTimeString('tr-TR')}`
+            : 'Araçtan konum yok. Yan menüde ayrı harita maddesi yoktur.'}
       </p>
     </div>
   );
@@ -164,6 +168,7 @@ export default function TripDetailPage() {
   const [staff, setStaff] = useState<StaffRow[]>([]);
   const [routes, setRoutes] = useState<RouteRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [staleLive, setStaleLive] = useState(false);
   const [vehicleId, setVehicleId] = useState('');
   const [vehicleReason, setVehicleReason] = useState('Araç arızası');
   const [crewRole, setCrewRole] = useState<'DRIVER' | 'ATTENDANT'>('DRIVER');
@@ -225,19 +230,49 @@ export default function TripDetailPage() {
     };
   }, []);
 
+  /**
+   * Canlı sefer yoklaması.
+   *
+   * Hata YUTULMAZ. Eskiden `catch(() => undefined)` vardı: çerez vardiya
+   * ortasında dolduğunda ya da API hata verdiğinde yoklama sessizce sonsuza
+   * kadar başarısız oluyor, ekran son anlık görüntüyü "Canlı" etiketiyle
+   * göstermeye devam ediyordu. Operatör bir saat önce susmuş bir aracı arayan
+   * veliye "yolda" diyordu.
+   */
   useEffect(() => {
     if (trip?.state !== 'ACTIVE') return;
+    let failures = 0;
     const timer = window.setInterval(() => {
-      void reload().catch(() => undefined);
+      void reload()
+        .then(() => {
+          failures = 0;
+          setStaleLive(false);
+        })
+        .catch(() => {
+          failures += 1;
+          setStaleLive(true);
+          if (failures >= 3) window.clearInterval(timer);
+        });
     }, 12_000);
     return () => window.clearInterval(timer);
   }, [reload, trip?.state]);
 
   async function cancel() {
+    // Bir otobüs dolusu çocuğun seferi iptal ediliyor ve velilere bildirim
+    // gidiyor; geri alma ucu yok. Gerekçe yazılmadan çalışmaz.
+    const reason = window.prompt(
+      'Sefer iptal edilecek ve velilere bildirim gidecek. İptal gerekçesini yazın:',
+      '',
+    );
+    if (reason === null) return;
+    if (reason.trim().length < 3) {
+      setError('İptal gerekçesi en az 3 karakter olmalı.');
+      return;
+    }
     try {
       await apiFetch(`/v1/trips/${params.tripId}/cancel`, {
         method: 'POST',
-        body: JSON.stringify({ reason: 'Yönetici iptali' }),
+        body: JSON.stringify({ reason: reason.trim() }),
       });
       await reload();
     } catch (caught) {
@@ -246,13 +281,16 @@ export default function TripDetailPage() {
   }
 
   async function adminVerify(student: TripStudent) {
+    // Talep seferin GÜNÜNE ait olmalı: yarının talebini bugünkü teslim için
+    // tüketmek, yarın çocuğun kodsuz teslim edilmesi demekti.
     const override = overrides.find(
       (row) =>
         row.studentId === student.studentId &&
+        row.serviceDate === trip?.serviceDate &&
         (row.status === 'ACTIVE' || row.status === 'LOCKED' || row.status === 'EXPIRED'),
     );
     if (!override) {
-      setError('Bu öğrenci için yönetici onayı verilecek teslim talebi yok');
+      setError('Bu öğrenci için bugüne ait, onaylanacak teslim talebi yok');
       return;
     }
     try {
@@ -339,14 +377,14 @@ export default function TripDetailPage() {
         {trip.plate} · {trip.schoolName}
       </h1>
       <p className="mt-1 text-sm text-muted">
-        {trip.segment === 'MORNING' ? 'Sabah' : 'Akşam'} · {trip.state} · {trip.seatCount} koltuk
+        {segmentLabel(trip.segment)} · {tripStateLabel(trip.state)} · {trip.seatCount} koltuk
         {trip.driverName ? ` · şoför ${trip.driverName}` : ''}
         {trip.attendantName ? ` · hostes ${trip.attendantName}` : ''}
       </p>
       {error ? <p className="mt-3 text-sm text-red-700">{error}</p> : null}
       <section className="mt-8 border border-dashed border-rule bg-white px-4 py-6">
         <h2 className="text-sm font-medium">Canlı</h2>
-        <LiveSchematic trip={trip} />
+        <LiveSchematic trip={trip} stale={staleLive} />
       </section>
       {openTrip ? (
         <section className="mt-8 grid gap-6 md:grid-cols-2">
@@ -356,7 +394,7 @@ export default function TripDetailPage() {
           >
             <h2 className="text-sm font-medium">Araç değiştir</h2>
             <select
-              className="mt-3 w-full rounded border border-rule bg-white px-2 py-1 text-sm"
+              className="mt-3 w-full rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
               value={vehicleId}
               onChange={(event) => setVehicleId(event.target.value)}
             >
@@ -368,7 +406,7 @@ export default function TripDetailPage() {
               ))}
             </select>
             <input
-              className="mt-2 w-full rounded border border-rule px-2 py-1 text-sm"
+              className="mt-2 w-full rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
               value={vehicleReason}
               onChange={(event) => setVehicleReason(event.target.value)}
             />
@@ -382,7 +420,7 @@ export default function TripDetailPage() {
           >
             <h2 className="text-sm font-medium">Personel değiştir</h2>
             <select
-              className="mt-3 w-full rounded border border-rule bg-white px-2 py-1 text-sm"
+              className="mt-3 w-full rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
               value={crewRole}
               onChange={(event) => {
                 setCrewRole(event.target.value === 'ATTENDANT' ? 'ATTENDANT' : 'DRIVER');
@@ -393,7 +431,7 @@ export default function TripDetailPage() {
               <option value="ATTENDANT">Hostes</option>
             </select>
             <select
-              className="mt-2 w-full rounded border border-rule bg-white px-2 py-1 text-sm"
+              className="mt-2 w-full rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
               value={crewMembershipId}
               onChange={(event) => setCrewMembershipId(event.target.value)}
             >
@@ -405,7 +443,7 @@ export default function TripDetailPage() {
               ))}
             </select>
             <input
-              className="mt-2 w-full rounded border border-rule px-2 py-1 text-sm"
+              className="mt-2 w-full rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
               value={crewReason}
               onChange={(event) => setCrewReason(event.target.value)}
             />
@@ -420,7 +458,7 @@ export default function TripDetailPage() {
             <h2 className="text-sm font-medium">Öğrenciyi başka sefere al</h2>
             <div className="mt-3 grid gap-2 md:grid-cols-2">
               <select
-                className="rounded border border-rule bg-white px-2 py-1 text-sm"
+                className="rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
                 value={moveStudentId}
                 onChange={(event) => setMoveStudentId(event.target.value)}
               >
@@ -432,7 +470,7 @@ export default function TripDetailPage() {
                 ))}
               </select>
               <select
-                className="rounded border border-rule bg-white px-2 py-1 text-sm"
+                className="rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
                 value={moveRouteId}
                 onChange={(event) => setMoveRouteId(event.target.value)}
               >
@@ -447,7 +485,7 @@ export default function TripDetailPage() {
               </select>
             </div>
             <input
-              className="mt-2 w-full rounded border border-rule px-2 py-1 text-sm"
+              className="mt-2 w-full rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
               value={moveReason}
               onChange={(event) => setMoveReason(event.target.value)}
             />
@@ -459,13 +497,16 @@ export default function TripDetailPage() {
       ) : null}
       <ul className="mt-6 divide-y divide-rule border border-rule bg-white text-sm">
         {trip.students.map((student) => (
-          <li key={student.id} className="flex items-center justify-between gap-3 px-4 py-2">
+          <li
+            key={student.id}
+            className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2"
+          >
             <span>
               {student.fullName}
               {student.deliveryTarget === 'TEMP' ? ' · farklı adres' : ''}
             </span>
             <span className="flex items-center gap-3">
-              <span className="text-muted">{student.state}</span>
+              <span className="text-muted">{studentStateLabel(student.state)}</span>
               {student.deliveryTarget === 'TEMP' && !student.deliveryVerified ? (
                 <button
                   type="button"

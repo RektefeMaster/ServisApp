@@ -6,6 +6,7 @@ import type { AppData } from '../data/ports.js';
 import type { Env } from '../env.js';
 import { badRequest, forbidden, HttpError, unauthorized, upgradeRequired } from '../http-error.js';
 import { createAuthFailLimiter } from './auth-fail-limit.js';
+import { createClientIp, type ClientIp } from './client-ip.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -30,10 +31,7 @@ function parseClient(value: string | undefined): 'crew' | 'parent' | 'admin' | n
   return null;
 }
 
-function assertClientForPath(
-  path: string,
-  client: 'crew' | 'parent' | 'admin' | null,
-): void {
+function assertClientForPath(path: string, client: 'crew' | 'parent' | 'admin' | null): void {
   if (!client) return;
   if (path.startsWith('/v1/admin') && client !== 'admin') {
     throw forbidden();
@@ -57,8 +55,12 @@ function unboundParentAuth(claims: JwtClaims): AuthContext {
   };
 }
 
-export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppData }): void {
+export function registerAuth(
+  app: FastifyInstance,
+  deps: { env: Env; data?: AppData; clientIp?: ClientIp },
+): void {
   const authFails = createAuthFailLimiter();
+  const clientIp = deps.clientIp ?? createClientIp(deps.env.CLIENT_IP_HEADER);
 
   app.addHook('onRequest', async (request) => {
     const path = request.url.split('?')[0] ?? request.url;
@@ -74,8 +76,7 @@ export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppD
     const publicDevLogin = request.method === 'POST' && path === '/v1/dev/login';
     const publicParentLogin = request.method === 'POST' && path === '/v1/dev/parent-login';
     const publicInvite = request.method === 'GET' && /^\/v1\/invites\/[^/]+$/.test(path);
-    const parentActivate =
-      request.method === 'POST' && path === '/v1/parent/invites/activate';
+    const parentActivate = request.method === 'POST' && path === '/v1/parent/invites/activate';
     const client = parseClient(
       headerString(request.headers['x-client'], 'invalid_client', 'x-client geçersiz'),
     );
@@ -105,7 +106,7 @@ export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppD
 
     const token = bearerToken(request.headers.authorization);
     if (!token) {
-      authFails.note(request.ip ?? 'unknown');
+      authFails.note(clientIp(request));
       throw unauthorized();
     }
 
@@ -118,7 +119,7 @@ export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppD
       });
     } catch (error) {
       if (error instanceof HttpError && error.statusCode === 401) {
-        authFails.note(request.ip ?? 'unknown');
+        authFails.note(clientIp(request));
       }
       throw error;
     }
@@ -127,7 +128,6 @@ export function registerAuth(app: FastifyInstance, deps: { env: Env; data?: AppD
       const snapshot = await deps.data.session.resolve({
         authUserId: claims.authUserId,
         phone: claims.phone,
-        email: claims.email,
       });
       if (snapshot.memberships.length === 0) {
         throw forbidden('Aktif şirket üyeliği yok');

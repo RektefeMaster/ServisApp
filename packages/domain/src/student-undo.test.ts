@@ -17,7 +17,7 @@ const lastBoard = {
 };
 
 describe('öğrenci komutu geri alma', () => {
-  it('son Bindi 10 dakika içinde EXPECTED\'e döner', () => {
+  it("son Bindi 10 dakika içinde EXPECTED'e döner", () => {
     expect(
       evaluateStudentUndo({
         tripState: 'ACTIVE',
@@ -42,9 +42,7 @@ describe('öğrenci komutu geri alma', () => {
   });
 
   it('DELIVER geri alınamaz', () => {
-    expect(
-      isUndoableStudentTransition('ON_BOARD', 'DELIVERED'),
-    ).toBe(false);
+    expect(isUndoableStudentTransition('ON_BOARD', 'DELIVERED')).toBe(false);
     expect(isUndoableStudentAction('DELIVER')).toBe(false);
     expect(
       evaluateStudentUndo({

@@ -20,6 +20,11 @@ import { loadAssignments, loadPinnedUsages, planForStudent } from './plan-query.
 import { applyTripStudentPlan, requirePlanApplied } from './plan-reconcile.js';
 import type { StaffListItem, StudentGuardianView, StudentListItem } from './ports.js';
 
+/** Cihazı üyelik durumu kapattı; üyelik ACTIVE olunca geri açılır. */
+const DEVICE_REVOKE_MEMBERSHIP = 'MEMBERSHIP_STATUS';
+/** Cihazı yönetici bilerek kapattı; üyelik geri açılsa da kapalı kalır. */
+const DEVICE_REVOKE_ADMIN = 'ADMIN';
+
 export async function listStaffTx(tx: Database, tenantId: string): Promise<StaffListItem[]> {
   const rows = await tx
     .select({
@@ -245,6 +250,38 @@ export async function revokeGuardianTx(
   return { status: 'REVOKED' };
 }
 
+/**
+ * İptal edilmiş veli ilişkisini AÇIKÇA geri açar.
+ *
+ * `upsertGuardianLink` iptal edilmiş bir ilişkiyi yeniden "veli ekle" akışıyla
+ * sessizce açmaz — doğru olan budur: yanlışlıkla yeniden eklenen bir telefon
+ * çocuğa erişimi geri kazanmamalı. Ama geri almanın AÇIK bir yolu da yoktu:
+ * yanlış tıklanan "Erişimi kaldır" ürün içinde onarılamıyordu ve tek çıkış
+ * veritabanına elle girmekti. Bu uç, aynı kararı yönetici bilerek verdiğinde
+ * uygular.
+ */
+export async function restoreGuardianTx(
+  tx: Database,
+  tenantId: string,
+  studentId: string,
+  membershipId: string,
+): Promise<{ status: 'ACTIVE' }> {
+  const [row] = await tx
+    .update(studentGuardian)
+    .set({ status: 'ACTIVE' })
+    .where(
+      and(
+        eq(studentGuardian.tenantId, tenantId),
+        eq(studentGuardian.studentId, studentId),
+        eq(studentGuardian.guardianMembershipId, membershipId),
+        eq(studentGuardian.status, 'REVOKED'),
+      ),
+    )
+    .returning({ id: studentGuardian.id });
+  if (!row) throw notFound('Geri açılacak iptal edilmiş veli ilişkisi yok');
+  return { status: 'ACTIVE' };
+}
+
 async function loadGuardians(
   tx: Database,
   tenantId: string,
@@ -379,12 +416,26 @@ export async function setStaffStatusTx(
   if (status === 'REVOKED' || status === 'SUSPENDED') {
     await tx
       .update(device)
-      .set({ revokedAt: new Date() })
+      .set({ revokedAt: new Date(), revokedReason: DEVICE_REVOKE_MEMBERSHIP })
       .where(
         and(
           eq(device.tenantId, tenantId),
           eq(device.membershipId, membershipId),
           isNull(device.revokedAt),
+        ),
+      );
+  } else {
+    // Askıdan dönen personelin telefonu yeniden çalışmalı. Aksi hâlde cihaz
+    // kimliği SecureStore'da sabit olduğu için kişi kalıcı olarak kilitli
+    // kalıyordu. Yöneticinin tek tek iptal ettiği cihazlar kapalı kalır.
+    await tx
+      .update(device)
+      .set({ revokedAt: null, revokedReason: null })
+      .where(
+        and(
+          eq(device.tenantId, tenantId),
+          eq(device.membershipId, membershipId),
+          eq(device.revokedReason, DEVICE_REVOKE_MEMBERSHIP),
         ),
       );
   }
@@ -401,7 +452,7 @@ export async function revokeDeviceTx(
 ): Promise<{ ok: true }> {
   const [row] = await tx
     .update(device)
-    .set({ revokedAt: new Date() })
+    .set({ revokedAt: new Date(), revokedReason: DEVICE_REVOKE_ADMIN })
     .where(and(eq(device.id, deviceId), eq(device.tenantId, tenantId), isNull(device.revokedAt)))
     .returning({ id: device.id });
   if (!row) throw notFound('Cihaz bulunamadı');

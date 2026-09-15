@@ -129,6 +129,8 @@ export const inviteSms = pgTable(
     bodyCiphertext: bytea('body_ciphertext'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Outbox worker'ı satırı üstlendiğinde damgalanır. */
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
   },
   (t) => [
     tenantRowUnique('invite_sms', t.tenantId, t.id),

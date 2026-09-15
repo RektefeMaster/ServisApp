@@ -40,6 +40,7 @@ export const OPS_SCENARIOS: readonly ScenarioId[] = [
   'unordered-replay',
   'last-minute-cancel',
   'temp-delivery',
+  'handover-guard',
   'otp-lock',
   'mid-trip-swap',
   'weak-network',
@@ -150,6 +151,34 @@ function runTempDelivery(world: SimWorld, tripId: string): void {
   student.deliveryVerified = true;
   if (!actStudent(world, studentId, 'DELIVER', 'DRIVER')) fail(world, 'TEMP doğrulamalı teslim');
   note(world, 'temp-delivery: kodsuz red, kodlu teslim');
+}
+
+/**
+ * Kapıda yetkili alıcı yoksa GUARDIAN_REQUIRED teslim reddedilir;
+ * MAY_LEAVE_ALONE çocuk aynı koşulda teslim edilebilir (SPEC teslim politikası).
+ */
+function runHandoverGuard(world: SimWorld, tripId: string): void {
+  const strictId = `${tripId}-u6`;
+  const strict = requireStudent(world, strictId);
+  strict.receiverMembershipId = null;
+  if (!actStudent(world, strictId, 'BOARD', 'DRIVER')) fail(world, 'handover BOARD');
+  if (actStudent(world, strictId, 'DELIVER', 'DRIVER')) {
+    fail(world, 'yetkili alıcı yokken teslim kabul edildi');
+  }
+  strict.receiverMembershipId = `${strictId}-g0`;
+  if (!actStudent(world, strictId, 'DELIVER', 'DRIVER')) {
+    fail(world, 'yetkili alıcı geldiğinde teslim reddedildi');
+  }
+
+  const aloneId = `${tripId}-u7`;
+  const alone = requireStudent(world, aloneId);
+  alone.handoverPolicy = 'MAY_LEAVE_ALONE';
+  alone.receiverMembershipId = null;
+  if (!actStudent(world, aloneId, 'BOARD', 'DRIVER')) fail(world, 'tek inebilir BOARD');
+  if (!actStudent(world, aloneId, 'DELIVER', 'DRIVER')) {
+    fail(world, 'tek inebilir çocuk teslim edilemedi');
+  }
+  note(world, 'handover-guard: alıcısız red, MAY_LEAVE_ALONE geçer');
 }
 
 function runOtpLock(world: SimWorld): void {
@@ -454,6 +483,9 @@ export function applyScenario(world: SimWorld, id: ScenarioId, tripId: string | 
       return;
     case 'temp-delivery':
       if (tripId) runTempDelivery(world, tripId);
+      return;
+    case 'handover-guard':
+      if (tripId) runHandoverGuard(world, tripId);
       return;
     case 'otp-lock':
       runOtpLock(world);

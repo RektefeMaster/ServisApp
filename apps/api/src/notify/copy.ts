@@ -1,7 +1,7 @@
-export function composeNotification(input: {
-  type: string;
-  studentName: string;
-}): { title: string; body: string } {
+export function composeNotification(input: { type: string; studentName: string }): {
+  title: string;
+  body: string;
+} {
   const name = input.studentName.trim() || 'Çocuğun';
   switch (input.type) {
     case 'STUDENT_ON_BOARD':
@@ -36,7 +36,14 @@ export function composeNotification(input: {
         body: `${name} için farklı teslimat talebi oluşturuldu.`,
       };
     case 'DELIVERY_OTP':
+      // Bu metin yalnız push'a düşerse görünür; SMS gövdesi kodu taşır ve
+      // outbox'ta alıcıya hitap edecek şekilde kurulur.
       return { title: 'Teslim kodu', body: `${name} için teslim kodu gönderildi.` };
+    case 'DELIVERY_OTP_SENT':
+      return {
+        title: 'Teslim kodu gönderildi',
+        body: `${name} için teslim kodu, belirlediğiniz kişinin telefonuna gönderildi.`,
+      };
     case 'RIDE_EXCEPTION':
       return { title: 'Bugün binmeyecek', body: `${name} bugün servise binmeyecek.` };
     default:

@@ -28,11 +28,26 @@ export function mapDbError(error: unknown): never {
   if (message.includes('delivery_override_student_mismatch')) {
     throw conflict('override_student_mismatch', 'Teslim talebi bu öğrenciye ait değil');
   }
+  if (message.includes('delivery_override_date_mismatch')) {
+    throw conflict(
+      'override_date_mismatch',
+      'Bu teslim talebi başka bir güne ait; o günün talebini kullanın',
+    );
+  }
   if (message.includes('delivery_override_not_temp')) {
     throw conflict('override_not_temp', 'Bu öğrenci farklı teslimatta değil');
   }
   if (message.includes('admin_override_reason_required')) {
     throw badRequest('invalid_body', 'Yönetici onay gerekçesi zorunlu');
+  }
+  if (message.includes('otp_resend_limit')) {
+    throw conflict('otp_resend_limit', 'Yeniden gönderim limiti doldu');
+  }
+  if (message.includes('delivery_override_has_otp')) {
+    throw conflict('override_has_otp', 'Bu talebin kodu zaten üretilmiş');
+  }
+  if (message.includes('otp_columns_are_protected')) {
+    throw new HttpError(500, 'otp_write_denied', 'Teslim kodu yazılamadı');
   }
   if (message.includes('identity_auth_mismatch')) {
     throw conflict('identity_auth_mismatch', 'Kimlik başka bir hesaba bağlı');
@@ -97,15 +112,56 @@ export function mapDbError(error: unknown): never {
   throw error instanceof Error ? error : new Error(String(error));
 }
 
-export function isUniqueViolation(error: unknown, fragment: string): boolean {
+/**
+ * Unique ihlalini KISIT ADIYLA yakalar — tam eşleşmeyle.
+ *
+ * Eskiden parçacık (substring) eşleşmesi yapılıyordu. Bu iki yönden de
+ * tehlikeliydi: `'device'` parçacığı `command_receipt_device_seq_uq` gibi
+ * alakasız kısıtları da yutuyor, `'notification_dedupe'` ise veritabanındaki
+ * gerçek ad `notification_tenant_id_dedupe_key_key` olduğu için HİÇ
+ * eşleşmiyordu. Adlar 0034 ile şemayla eşitlendi; burada da tam eşleşme aranır.
+ */
+export function isUniqueViolation(error: unknown, ...names: string[]): boolean {
   if (pgCode(error) !== '23505') return false;
-  const constraint = pgConstraint(error) ?? '';
-  return constraint.includes(fragment) || errorMessage(error).includes(fragment);
+  const constraint = pgConstraint(error);
+  if (constraint) return names.includes(constraint);
+  // Sürücü kısıt adını taşımıyorsa mesajdaki tırnaklı ada bakılır.
+  const message = errorMessage(error);
+  return names.some((name) => message.includes(`"${name}"`));
 }
 
+/**
+ * Hata zincirinin TAMAMINI okur.
+ *
+ * Veritabanı fonksiyonları iş kuralını `raise exception '<kod>'` ile bildirir.
+ * Bu metin, drizzle'ın `tx.execute(sql...)` yolunda üst seviye hata mesajına
+ * KONMAZ; yalnız `cause` zincirindeki PostgresError'da bulunur. Yalnız
+ * `error.message` okunduğu sürece bu kuralların hiçbiri eşleşmiyor ve
+ * kullanıcıya "Beklenmeyen bir hata oluştu" (500) dönüyordu — oysa sunucu
+ * tam olarak neyin yanlış olduğunu biliyordu.
+ */
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof Error) {
+      parts.push(current.message);
+      current = current.cause;
+      continue;
+    }
+    if (typeof current === 'string') {
+      parts.push(current);
+      break;
+    }
+    if (typeof current === 'object' && 'message' in current) {
+      const message = (current as { message?: unknown }).message;
+      if (typeof message === 'string') parts.push(message);
+      current = (current as { cause?: unknown }).cause;
+      continue;
+    }
+    break;
+  }
+  return parts.length > 0 ? parts.join(' | ') : String(error);
 }
 
 function pgCode(error: unknown): string | undefined {

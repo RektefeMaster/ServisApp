@@ -11,7 +11,10 @@ export interface RealtimeTransport {
 }
 
 export class MemoryRealtimeTransport implements RealtimeTransport {
-  private readonly history = new Map<string, Array<{ tripId: string; payload: VehicleBroadcast }>>();
+  private readonly history = new Map<
+    string,
+    Array<{ tripId: string; payload: VehicleBroadcast }>
+  >();
   private readonly ended = new Set<string>();
   private readonly viewers = new Map<string, Set<string>>();
 

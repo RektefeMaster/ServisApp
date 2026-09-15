@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { coordinate, phoneE164, uuid } from './primitives.js';
 
+/** Üyelik durumu. Veritabanındaki `membership_status` ile birebir aynıdır. */
+export const membershipStatus = z.enum(['ACTIVE', 'INVITED', 'SUSPENDED', 'REVOKED']);
+export type MembershipStatus = z.infer<typeof membershipStatus>;
+
 export const membershipRole = z.enum(['ADMIN', 'DRIVER', 'ATTENDANT', 'GUARDIAN']);
 export type MembershipRole = z.infer<typeof membershipRole>;
 
@@ -23,7 +27,7 @@ export const sessionMembership = z.object({
   membershipId: uuid,
   tenantId: uuid,
   tenantName: z.string(),
-  status: z.enum(['ACTIVE', 'INVITED', 'SUSPENDED', 'REVOKED']),
+  status: membershipStatus,
   roles: z.array(membershipRole),
 });
 export type SessionMembership = z.infer<typeof sessionMembership>;

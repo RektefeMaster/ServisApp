@@ -40,6 +40,7 @@ import {
   listStaffTx,
   listStudentsTx,
   revokeDeviceTx,
+  restoreGuardianTx,
   revokeGuardianTx,
   setStaffStatusTx,
 } from './students-admin.js';
@@ -49,6 +50,7 @@ import { createTripPort } from './trips.js';
 import { createDevicePort } from './devices.js';
 import { createExceptionsPort } from './exceptions.js';
 import { createOperationsPort } from './operations.js';
+import { reconcileOpenTripsTx } from './trip-reconcile.js';
 
 interface SessionRow {
   identityId: string;
@@ -78,8 +80,40 @@ interface DevParentRow {
 const TEST_INVITE_PEPPER = 'test-pepper-en-az-otuziki-karakterxxxx';
 const TEST_OTP_ENCRYPTION_KEY = 'test-key-en-az-otuziki-karakter-olmali-x';
 
+/**
+ * Kill switch ve minimum sürüm HER istekte okunuyordu: sürüm kapısı auth
+ * hook'unda çalıştığı için tek satırlık `platform_settings` sorgusu, 100 araçlık
+ * bir filoda saniyede onlarca kez tekrarlanıyordu. Satır nadiren değişir; kısa
+ * ömürlü bir önbellek kill switch'in yayılma süresini ölçülebilir tutar.
+ *
+ * Testlerde 0: e2e politikayı değiştirip aynı anda 426 bekler.
+ */
+const PLATFORM_CACHE_MS = process.env['NODE_ENV'] === 'test' ? 0 : 5_000;
+
 interface PostgresDataOptions extends Partial<OnboardingOptions> {
   otpEncryptionKey?: string;
+  /** Varsayılan 5 sn (testte 0). Kill switch bu süre içinde yayılır. */
+  platformCacheMs?: number;
+}
+
+function cachedPlatform(sqlClient: postgres.Sql, ttlMs: number): () => Promise<PlatformConfig> {
+  let value: PlatformConfig | null = null;
+  let readAt = 0;
+  let inFlight: Promise<PlatformConfig> | null = null;
+  return async () => {
+    if (value && Date.now() - readAt < ttlMs) return value;
+    // Aynı anda gelen istekler tek sorguyu paylaşır.
+    inFlight ??= readPlatform(sqlClient)
+      .then((fresh) => {
+        value = fresh;
+        readAt = Date.now();
+        return fresh;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+    return inFlight;
+  };
 }
 
 function resolveOnboardingOptions(options?: PostgresDataOptions): OnboardingOptions {
@@ -139,7 +173,7 @@ export function createPostgresData(
   const operations = createOperationsPort(db);
   const adminCore = createAdminPort(db);
   return {
-    getPlatform: () => readPlatform(sqlClient),
+    getPlatform: cachedPlatform(sqlClient, options?.platformCacheMs ?? PLATFORM_CACHE_MS),
     session: createSessionPort(sqlClient),
     trips,
     parent: {
@@ -167,14 +201,16 @@ export function createPostgresData(
         return {
           children: home.children.map((child) => ({
             ...child,
-            day:
-              plans.get(child.studentId) ?? {
-                morningAbsent: false,
-                eveningAbsent: false,
-                morningExceptionId: null,
-                eveningExceptionId: null,
-                deliveryOverride: null,
-              },
+            day: plans.get(child.studentId) ?? {
+              // Plan durumu çocuğun kendi satırından gelir; burada uydurma yok.
+              morningPlanStatus: child.morningPlanStatus,
+              eveningPlanStatus: child.eveningPlanStatus,
+              morningAbsent: false,
+              eveningAbsent: false,
+              morningExceptionId: null,
+              eveningExceptionId: null,
+              deliveryOverride: null,
+            },
           })),
         };
       },
@@ -202,8 +238,7 @@ export function createPostgresData(
       previewImport: (tenantId, actorMembershipId, input) =>
         onboarding.previewImport(tenantId, actorMembershipId, input),
       getImport: (tenantId, batchId) => onboarding.getImport(tenantId, batchId),
-      commitImport: (tenantId, batchId, input) =>
-        onboarding.commitImport(tenantId, batchId, input),
+      commitImport: (tenantId, batchId, input) => onboarding.commitImport(tenantId, batchId, input),
       createInvite: (tenantId, actorMembershipId, membershipId) =>
         onboarding.createInvite(tenantId, actorMembershipId, membershipId),
       sendInviteSms: (tenantId, inviteId) => onboarding.sendInviteSms(tenantId, inviteId),
@@ -283,8 +318,7 @@ function createSessionPort(sqlClient: postgres.Sql): SessionPort {
         const [row] = await sqlClient<{ session: SessionRow }[]>`
           select resolve_session(
             ${input.authUserId}::uuid,
-            ${input.phone},
-            ${input.email}
+            ${input.phone}
           ) as session
         `;
         const session = row?.session;
@@ -393,6 +427,7 @@ type SetupAdmin = Pick<
   | 'endStudent'
   | 'createGuardian'
   | 'revokeGuardian'
+  | 'restoreGuardian'
   | 'createHoliday'
   | 'serviceDateToday'
 >;
@@ -507,14 +542,29 @@ function createAdminPort(db: Database): SetupAdmin {
         const membershipId = await attachMembership(tx, tenantId, identityId, input.role);
 
         if (input.vehicleId && input.role !== 'ADMIN') {
+          const validFrom = input.validFrom
+            ? new Date(`${input.validFrom}T00:00:00.000Z`)
+            : new Date();
+          // Bir araçta bir rol için tek açık atama olur. Eskisini kapatmadan
+          // yenisini açmak, en son personel askıya alındığında yıllar önceki
+          // şoförün atamasını "diriltiyordu".
+          await tx
+            .update(staffAssignment)
+            .set({ validTo: validFrom })
+            .where(
+              and(
+                eq(staffAssignment.tenantId, tenantId),
+                eq(staffAssignment.vehicleId, input.vehicleId),
+                eq(staffAssignment.role, input.role),
+                isNull(staffAssignment.validTo),
+              ),
+            );
           await tx.insert(staffAssignment).values({
             tenantId,
             vehicleId: input.vehicleId,
             membershipId,
             role: input.role,
-            validFrom: input.validFrom
-              ? new Date(`${input.validFrom}T00:00:00.000Z`)
-              : new Date(),
+            validFrom,
           });
         }
 
@@ -533,9 +583,7 @@ function createAdminPort(db: Database): SetupAdmin {
     },
 
     listStaffDevices(tenantId, membershipId) {
-      return withAdmin(db, tenantId, '', (tx) =>
-        listStaffDevicesTx(tx, tenantId, membershipId),
-      );
+      return withAdmin(db, tenantId, '', (tx) => listStaffDevicesTx(tx, tenantId, membershipId));
     },
 
     revokeDevice(tenantId, deviceId) {
@@ -600,7 +648,9 @@ function createAdminPort(db: Database): SetupAdmin {
     },
 
     endStudent(tenantId, studentId, enrollmentEnd) {
-      return withAdmin(db, tenantId, '', (tx) => endStudentTx(tx, tenantId, studentId, enrollmentEnd));
+      return withAdmin(db, tenantId, '', (tx) =>
+        endStudentTx(tx, tenantId, studentId, enrollmentEnd),
+      );
     },
 
     createGuardian(tenantId, studentId, input: CreateGuardianInput) {
@@ -640,6 +690,12 @@ function createAdminPort(db: Database): SetupAdmin {
       );
     },
 
+    restoreGuardian(tenantId, studentId, membershipId) {
+      return withAdmin(db, tenantId, '', (tx) =>
+        restoreGuardianTx(tx, tenantId, studentId, membershipId),
+      );
+    },
+
     createHoliday(tenantId, schoolId, input: CreateHolidayInput) {
       return withAdmin(db, tenantId, '', async (tx) => {
         const [owned] = await tx
@@ -662,6 +718,12 @@ function createAdminPort(db: Database): SetupAdmin {
               schoolCalendarDay.date,
             ],
           });
+        // Kar tatili akşam 22:00'de ilan edilse bile yarının seferi çoktan
+        // üretilmiş olabilir; takvim satırı tek başına onu iptal etmez.
+        await reconcileOpenTripsTx(tx, tenantId, {
+          schoolIds: [schoolId],
+          serviceDate: input.date,
+        });
         return { schoolId, date: input.date, type: 'HOLIDAY' as const };
       });
     },
@@ -680,7 +742,9 @@ async function attachPinnedAddress(
   if (!owned) throw new HttpError(404, 'not_found', 'Öğrenci bulunamadı');
 
   const usages: Array<'PICKUP' | 'DROPOFF'> = input.usage ? [input.usage] : ['PICKUP', 'DROPOFF'];
-  const today = istanbulCalendarDate();
+  // Servis günü kiracının saat diliminde okunur; şemada timezone alanı olduğu
+  // hâlde burada 'Europe/Istanbul' sabitti.
+  const today = await tenantCalendarDate(tx, tenantId);
   const yesterday = previousCalendarDate(today);
   for (const usage of usages) {
     await tx
@@ -704,8 +768,12 @@ async function attachPinnedAddress(
   }
 }
 
-function istanbulCalendarDate(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
+async function tenantCalendarDate(tx: Database, tenantId: string): Promise<string> {
+  const [row] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
+  return ymdInTimeZone(new Date(), row?.timezone ?? 'Europe/Istanbul');
 }
 
 function previousCalendarDate(ymd: string): string {

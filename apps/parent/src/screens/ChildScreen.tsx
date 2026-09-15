@@ -1,8 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import type { ParentDayPlan } from '@servisapp/contracts';
-import { colors, space } from '@servisapp/ui';
+import {
+  AppText,
+  AppIcon,
+  ActionRow,
+  Avatar,
+  SectionHeading,
+  StatusChip,
+  Surface,
+  Button,
+  IconButton,
+  InlineAlert,
+  Screen,
+  colors,
+  space,
+  useHardwareBack,
+} from '@servisapp/ui';
 import { ApiError, fetchDayPlan, resendDeliveryOtp, type ParentSession } from '../api/client';
+import { deliveryOverrideLabel, segmentChip } from '../status';
 
 export function ChildScreen({
   session,
@@ -26,6 +42,7 @@ export function ChildScreen({
   const [plan, setPlan] = useState<ParentDayPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  useHardwareBack(onBack);
 
   const reload = useCallback(async () => {
     try {
@@ -54,7 +71,7 @@ export function ChildScreen({
         current?.deliveryOverride
           ? {
               ...current,
-              deliveryOverride: { ...current.deliveryOverride, otpCode: next.otpCode },
+              deliveryOverride: { ...current.deliveryOverride, otpSentTo: next.otpSentTo },
             }
           : current,
       );
@@ -67,73 +84,133 @@ export function ChildScreen({
   }
 
   const override = plan?.deliveryOverride;
+
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <Pressable onPress={onBack}>
-        <Text style={styles.back}>← Ana ekran</Text>
-      </Pressable>
-      <Text style={styles.name}>{studentName}</Text>
-      <Text style={styles.lede}>Bugünkü plan yalnız senin çocuğun için.</Text>
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-      {!plan ? <ActivityIndicator color={colors.headlamp} /> : null}
+    <Screen scroll>
+      <IconButton label="← Ana ekran" onPress={onBack} style={styles.back} />
+      <View style={styles.identity}>
+        <Avatar name={studentName} large />
+        <View style={{ flex: 1, gap: 4 }}>
+          <AppText preset="title">{studentName}</AppText>
+          <AppText preset="meta">Servis planı ve günlük işlemler</AppText>
+        </View>
+      </View>
+      <SectionHeading title="Bugünün planı" />
+
+      {error ? <InlineAlert title={error} tone="danger" /> : null}
+      {!plan && !error ? <ActivityIndicator color={colors.rail} style={styles.loader} /> : null}
+      {!plan && error ? (
+        <Button label="Tekrar dene" variant="secondary" onPress={() => void reload()} />
+      ) : null}
+
       {plan ? (
-        <View style={styles.card}>
-          <Text style={styles.meta}>
-            Sabah: {plan.morningAbsent ? 'binmeyecek' : 'planlı'}
-          </Text>
-          <Text style={styles.meta}>
-            Akşam: {plan.eveningAbsent ? 'binmeyecek' : 'planlı'}
-          </Text>
+        <Surface>
+          <View style={styles.planRow}>
+            <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+              <AppIcon name="sun" />
+              <AppText preset="strong">Sabah · Okula gidiş</AppText>
+            </View>
+            <StatusChip {...segmentChip(plan.morningPlanStatus, plan.morningAbsent)} />
+          </View>
+          <View style={styles.planRow}>
+            <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+              <AppIcon name="home" />
+              <AppText preset="strong">Akşam · Eve dönüş</AppText>
+            </View>
+            <StatusChip {...segmentChip(plan.eveningPlanStatus, plan.eveningAbsent)} />
+          </View>
           {override ? (
             <>
-              <Text style={styles.meta}>
-                Farklı teslimat · {override.status === 'PENDING_APPROVAL' ? 'yönetici onayı bekleniyor' : override.status}
-              </Text>
-              <Text style={styles.meta}>{override.addressText}</Text>
-              {override.otpCode ? <Text style={styles.code}>{override.otpCode}</Text> : null}
+              <AppText preset="strong" style={styles.override}>
+                {deliveryOverrideLabel(override.status)}
+              </AppText>
+              <AppText preset="meta">{override.addressText}</AppText>
+              {override.otpSentTo ? (
+                <AppText preset="meta" style={styles.otp}>
+                  Kod, teslim alacak kişiye ({override.receiverName}, {override.otpSentTo}) SMS ile
+                  gitti. Kapıda o kişi söyler — uygulamada görünmez.
+                </AppText>
+              ) : override.status === 'PENDING_APPROVAL' ? (
+                <AppText preset="meta" style={styles.otp}>
+                  Yönetici onayından sonra teslim kodu alıcı telefona gider.
+                </AppText>
+              ) : null}
               {override.status === 'ACTIVE' ? (
-                <Pressable disabled={busy} onPress={() => void resend()} style={styles.secondary}>
-                  <Text style={styles.secondaryText}>Kodu yeniden göster</Text>
-                </Pressable>
+                <Button
+                  label="Kodu yeniden gönder"
+                  variant="ghost"
+                  onPress={() => void resend()}
+                  loading={busy}
+                  style={styles.resend}
+                />
               ) : null}
             </>
           ) : (
-            <Text style={styles.meta}>Bugün ev adresine bırakılacak</Text>
+            <AppText preset="meta">Bugün kayıtlı adrese bırakılacak</AppText>
           )}
-        </View>
+        </Surface>
       ) : null}
-      <Pressable onPress={onAbsent} style={styles.cta}>
-        <Text style={styles.ctaText}>Bugün kullanmayacak</Text>
-      </Pressable>
-      <Pressable onPress={onDelivery} style={styles.cta}>
-        <Text style={styles.ctaText}>Farklı teslimat</Text>
-      </Pressable>
-      <Pressable onPress={onAddress} style={styles.cta}>
-        <Text style={styles.ctaText}>Adres değişikliği</Text>
-      </Pressable>
-    </ScrollView>
+
+      <SectionHeading title="Planını düzenle" detail="Hızlı işlemler" />
+      <View style={styles.actions}>
+        <ActionRow
+          index="01"
+          title="Bugün kullanmayacak"
+          description="Sabah veya akşam için haber ver."
+          onPress={onAbsent}
+        />
+        <ActionRow
+          index="02"
+          title="Farklı teslimat"
+          description="Bugüne özel adres ve teslim alacak kişi."
+          onPress={onDelivery}
+        />
+        <ActionRow
+          index="03"
+          title="Adres değişikliği"
+          description="Kalıcı adres güncellemesi talep et."
+          onPress={onAddress}
+        />
+      </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.asphalt },
-  content: { padding: space.lg, paddingTop: 56 },
-  back: { color: colors.headlamp, marginBottom: space.md },
-  name: { color: colors.paper, fontSize: 28, fontWeight: '800' },
-  lede: { color: colors.muted, marginTop: 6, marginBottom: space.lg },
-  error: { color: colors.danger, marginBottom: space.md },
-  card: { backgroundColor: colors.steel, borderRadius: 20, padding: space.lg, marginBottom: space.md },
-  meta: { color: colors.muted, marginTop: 6 },
-  code: { color: colors.headlamp, fontSize: 32, fontWeight: '800', marginTop: space.md, letterSpacing: 6 },
-  cta: {
-    backgroundColor: colors.headlamp,
-    borderRadius: 16,
-    minHeight: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: space.sm,
+  identity: { flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md },
+  planRow: {
+    gap: space.xs,
+    paddingBottom: space.md,
+    marginBottom: space.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.line,
   },
-  ctaText: { color: colors.asphalt, fontWeight: '800' },
-  secondary: { marginTop: space.md, alignItems: 'center' },
-  secondaryText: { color: colors.headlamp, fontWeight: '700' },
+  back: {
+    alignSelf: 'flex-start',
+    marginBottom: space.xs,
+    paddingHorizontal: 0,
+  },
+  lede: {
+    marginTop: space.xxs,
+    marginBottom: space.lg,
+  },
+  loader: { marginVertical: space.md },
+  summary: {
+    marginBottom: space.lg,
+    gap: space.xxs,
+  },
+  override: {
+    marginTop: space.sm,
+  },
+  otp: {
+    marginTop: space.xs,
+  },
+  resend: {
+    alignSelf: 'flex-start',
+    marginTop: space.sm,
+    paddingHorizontal: 0,
+  },
+  actions: {
+    gap: space.sm,
+  },
 });

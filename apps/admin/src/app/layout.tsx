@@ -16,7 +16,8 @@ const serif = Source_Serif_4({
 });
 
 export const metadata: Metadata = {
-  title: 'ServisApp Yönetim',
+  // Her bölüm kendi `layout.tsx`'inde başlığını verir; şablon onu buraya oturtur.
+  title: { default: 'ServisApp Yönetim', template: '%s · ServisApp' },
   description: 'Okul servisi operasyon paneli',
 };
 

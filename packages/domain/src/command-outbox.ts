@@ -29,8 +29,19 @@ export interface CommandServerResult {
   reason?: string;
 }
 
-export function nextDeviceSeq(items: readonly OutboxItem[]): number {
-  return items.reduce((max, item) => Math.max(max, item.deviceSeq), -1) + 1;
+/**
+ * Cihazın bir sonraki komut sırası.
+ *
+ * `floor`, cihazda KALICI olarak saklanan en son verilmiş sıradır. Yalnız
+ * kuyruğa bakmak yetmez: komut sunucuda işlenip kuyruktan silindiğinde sayaç
+ * sıfıra döner, sunucu da aynı cihaz + aynı sıra için farklı bir olay görüp
+ * `device_seq_reuse` ile reddeder. O durumda günün ilk komutundan sonra hiçbir
+ * işaret sunucuya ulaşmaz.
+ */
+export function nextDeviceSeq(items: readonly OutboxItem[], floor = -1): number {
+  const fromQueue = items.reduce((max, item) => Math.max(max, item.deviceSeq), -1) + 1;
+  const fromFloor = Number.isInteger(floor) && floor >= 0 ? floor + 1 : 0;
+  return Math.max(fromQueue, fromFloor);
 }
 
 export function nextFlushBatch(items: readonly OutboxItem[]): OutboxItem[] {
@@ -136,7 +147,5 @@ export function dropPendingForStudent(
   items: readonly OutboxItem[],
   tripStudentId: string,
 ): OutboxItem[] {
-  return items.filter(
-    (item) => item.tripStudentId !== tripStudentId || item.status !== 'PENDING',
-  );
+  return items.filter((item) => item.tripStudentId !== tripStudentId || item.status !== 'PENDING');
 }

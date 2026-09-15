@@ -44,6 +44,8 @@ export function badRequest(code: string, message: string): HttpError {
   return new HttpError(400, code, message);
 }
 
-export function tooManyRequests(message = 'Çok fazla deneme; biraz sonra tekrar deneyin'): HttpError {
+export function tooManyRequests(
+  message = 'Çok fazla deneme; biraz sonra tekrar deneyin',
+): HttpError {
   return new HttpError(429, 'rate_limited', message);
 }

@@ -12,13 +12,26 @@ import {
   type Database,
 } from '@servisapp/db';
 import { decryptDeliveryOtp } from '../crypto/delivery-otp.js';
-import { and, asc, eq, isNull, lte, or } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lt, lte, or } from 'drizzle-orm';
 import type postgres from 'postgres';
 import { composeNotification } from '../notify/copy.js';
 import { planNotificationDelivery } from '../notify/delivery-plan.js';
 import type { PushSender, SmsSender } from '../notify/senders.js';
 
 export const OUTBOX_QUEUE = 'notify.outbox';
+
+/**
+ * Dış sağlayıcıya yapılan HTTP çağrısı DB transaction'ının DIŞINDA olur.
+ *
+ * Önceki hâlde satırlar `for update skip locked` ile kilitlenir, sonra aynı
+ * transaction kapanmadan SMS/push sağlayıcısına gidilirdi. Sağlayıcı yavaşladığı
+ * sürece transaction açık, satır kilitli ve bağlantı işgal kalıyordu. Artık üç
+ * evre var: kısa "claim" transaction'ı, transaction'sız gönderim, kısa
+ * "sonuçlandır" transaction'ı. Çöken worker'ın claim'i CLAIM_TIMEOUT_MS sonra
+ * serbest kalır.
+ */
+const CLAIM_TIMEOUT_MS = 5 * 60_000;
+const CLAIM_BATCH = 50;
 
 export interface OutboxOptions {
   encryptionKey: string;
@@ -32,6 +45,28 @@ export interface OutboxResult {
   notifications: number;
   inviteSms: number;
   failed: number;
+}
+
+type SendOutcome = 'sent' | 'failed' | 'retry';
+
+interface NotificationJob {
+  id: string;
+  kind: 'push' | 'sms';
+  title: string;
+  body: string;
+  type: string;
+  tripId: string;
+  studentId: string;
+  tokens: string[];
+  phone: string;
+  /** PUSH kaydı SMS'e düştüyse kanal kolonu da güncellenir. */
+  channelBecomesSms: boolean;
+}
+
+interface InviteJob {
+  id: string;
+  phone: string;
+  body: string;
 }
 
 function asBuffer(value: unknown): Buffer | null {
@@ -52,24 +87,45 @@ export async function runOutboxJob(
   let notifications = 0;
   let inviteCount = 0;
   let failed = 0;
+
   for (const tenant of tenants) {
-    const processed = await withTenant(
-      db,
-      { tenantId: tenant.id, membershipId: null, role: 'SYSTEM' },
-      async (tx) => {
-        const notes = await processDueNotifications(tx, tenant.id, options, now);
-        const invites = await processDueInviteSms(tx, tenant.id, options);
-        return {
-          notes: notes.notes,
-          invites: invites.invites,
-          failed: notes.failed + invites.failed,
-        };
-      },
-    );
-    notifications += processed.notes;
-    inviteCount += processed.invites;
-    failed += processed.failed;
+    const context = { tenantId: tenant.id, membershipId: null, role: 'SYSTEM' } as const;
+
+    // 1) Kısa transaction: üstlen ve gönderim için gereken her şeyi topla.
+    const claimed = await withTenant(db, context, async (tx) => ({
+      notifications: await claimNotifications(tx, tenant.id, options, now),
+      invites: await claimInviteSms(tx, tenant.id, options, now),
+    }));
+    failed += claimed.notifications.failed + claimed.invites.failed;
+
+    // 2) Transaction yok: sağlayıcı ne kadar yavaş olursa olsun DB beklemez.
+    const noteOutcomes = new Map<string, SendOutcome>();
+    for (const job of claimed.notifications.jobs) {
+      noteOutcomes.set(job.id, await sendNotification(job, options));
+    }
+    const inviteOutcomes = new Map<string, SendOutcome>();
+    for (const job of claimed.invites.jobs) {
+      inviteOutcomes.set(job.id, await sendInvite(job, options));
+    }
+
+    // 3) Kısa transaction: sonucu yaz.
+    if (noteOutcomes.size > 0 || inviteOutcomes.size > 0) {
+      await withTenant(db, context, async (tx) => {
+        await settleNotifications(tx, tenant.id, claimed.notifications.jobs, noteOutcomes);
+        await settleInvites(tx, tenant.id, inviteOutcomes);
+      });
+    }
+
+    for (const outcome of noteOutcomes.values()) {
+      if (outcome === 'sent') notifications += 1;
+      else if (outcome === 'failed') failed += 1;
+    }
+    for (const outcome of inviteOutcomes.values()) {
+      if (outcome === 'sent') inviteCount += 1;
+      else if (outcome === 'failed') failed += 1;
+    }
   }
+
   return {
     tenants: tenants.length,
     notifications,
@@ -78,16 +134,18 @@ export async function runOutboxJob(
   };
 }
 
-async function processDueNotifications(
+async function claimNotifications(
   tx: Database,
   tenantId: string,
   options: OutboxOptions,
   now: Date,
-): Promise<{ notes: number; invites: number; failed: number }> {
+): Promise<{ jobs: NotificationJob[]; failed: number }> {
+  const staleBefore = new Date(now.getTime() - CLAIM_TIMEOUT_MS);
   const due = await tx
     .select({
       id: notification.id,
       recipientMembershipId: notification.recipientMembershipId,
+      recipientPhone: notification.recipientPhone,
       channel: notification.channel,
       type: notification.type,
       tripId: notification.tripId,
@@ -101,195 +159,350 @@ async function processDueNotifications(
         eq(notification.tenantId, tenantId),
         eq(notification.status, 'QUEUED'),
         or(isNull(notification.holdUntil), lte(notification.holdUntil, now)),
+        or(isNull(notification.claimedAt), lt(notification.claimedAt, staleBefore)),
       ),
     )
     .orderBy(asc(notification.createdAt))
     .for('update', { skipLocked: true })
-    .limit(50);
+    .limit(CLAIM_BATCH);
 
-  let notes = 0;
-  let failed = 0;
+  const jobs: NotificationJob[] = [];
+  const claimedIds: string[] = [];
+  const failedIds: string[] = [];
+
+  // Satır başına öğrenci adı / push jetonu / telefon sorgusu, 50'lik partide
+  // 150 gidiş-dönüş demekti — üstelik her 15 saniyede bir, her kiracı için.
+  // Parti bir kez, toplu okunur.
+  const names = await loadStudentNames(tx, tenantId, distinct(due.map((row) => row.studentId)));
+  const memberships = distinct(due.map((row) => row.recipientMembershipId));
+  const tokensByMembership = await loadPushTokens(tx, tenantId, memberships);
+  const phoneByMembership = await loadMembershipPhones(tx, tenantId, memberships);
+
   for (const row of due) {
-    const outcome = await deliverNotification(tx, tenantId, row, options, now);
-    if (outcome === 'sent') notes += 1;
-    else if (outcome === 'failed') failed += 1;
+    const studentName = (row.studentId ? names.get(row.studentId) : null) ?? 'Çocuğun';
+    const copy = composeNotification({ type: row.type, studentName });
+    // Telefona adresli bildirimin üyeliği yoktur: push hedefi de yoktur, SMS'tir.
+    const tokens = row.recipientMembershipId
+      ? (tokensByMembership.get(row.recipientMembershipId) ?? [])
+      : [];
+    const plan = planNotificationDelivery({
+      channel: row.channel,
+      hasPushToken: tokens.length > 0,
+      smsAvailable: options.sms !== null,
+      ageMs: now.getTime() - row.createdAt.getTime(),
+    });
+    if (plan === 'skip') continue;
+    if (plan === 'fail') {
+      failedIds.push(row.id);
+      continue;
+    }
+    if (plan === 'sms') {
+      if (!options.sms) continue;
+      const body =
+        row.type === 'DELIVERY_OTP'
+          ? await loadOtpSmsBody(tx, tenantId, row.refId, options.encryptionKey, studentName)
+          : copy.body;
+      const phone =
+        row.recipientPhone ??
+        (row.recipientMembershipId
+          ? (phoneByMembership.get(row.recipientMembershipId) ?? null)
+          : null);
+      if (!body || !phone) {
+        failedIds.push(row.id);
+        continue;
+      }
+      jobs.push({
+        id: row.id,
+        kind: 'sms',
+        title: copy.title,
+        body,
+        type: row.type,
+        tripId: row.tripId ?? '',
+        studentId: row.studentId ?? '',
+        tokens: [],
+        phone,
+        channelBecomesSms: row.channel === 'PUSH',
+      });
+      claimedIds.push(row.id);
+      continue;
+    }
+    jobs.push({
+      id: row.id,
+      kind: 'push',
+      title: copy.title,
+      body: copy.body,
+      type: row.type,
+      tripId: row.tripId ?? '',
+      studentId: row.studentId ?? '',
+      tokens,
+      phone: '',
+      channelBecomesSms: false,
+    });
+    claimedIds.push(row.id);
   }
-  return { notes, invites: 0, failed };
+
+  if (failedIds.length > 0) {
+    await tx
+      .update(notification)
+      .set({ status: 'FAILED', sentAt: null, claimedAt: null })
+      .where(and(eq(notification.tenantId, tenantId), inArray(notification.id, failedIds)));
+  }
+  if (claimedIds.length > 0) {
+    await tx
+      .update(notification)
+      .set({ claimedAt: now })
+      .where(and(eq(notification.tenantId, tenantId), inArray(notification.id, claimedIds)));
+  }
+  return { jobs, failed: failedIds.length };
 }
 
-async function processDueInviteSms(
+async function claimInviteSms(
   tx: Database,
   tenantId: string,
   options: OutboxOptions,
-): Promise<{ notes: number; invites: number; failed: number }> {
-  if (!options.sms) return { notes: 0, invites: 0, failed: 0 };
+  now: Date,
+): Promise<{ jobs: InviteJob[]; failed: number }> {
+  if (!options.sms) return { jobs: [], failed: 0 };
+  const staleBefore = new Date(now.getTime() - CLAIM_TIMEOUT_MS);
+  // Davet sahibinin telefonu tek JOIN ile gelir; satır başına iki sorgu yoktu.
   const due = await tx
     .select({
       id: inviteSms.id,
-      inviteId: inviteSms.inviteId,
       bodyCiphertext: inviteSms.bodyCiphertext,
+      phone: identity.phoneE164,
     })
     .from(inviteSms)
-    .where(and(eq(inviteSms.tenantId, tenantId), eq(inviteSms.status, 'QUEUED')))
-    .for('update', { skipLocked: true })
-    .limit(50);
+    .innerJoin(
+      guardianInvite,
+      and(
+        eq(guardianInvite.id, inviteSms.inviteId),
+        eq(guardianInvite.tenantId, inviteSms.tenantId),
+      ),
+    )
+    .innerJoin(identity, eq(identity.id, guardianInvite.identityId))
+    .where(
+      and(
+        eq(inviteSms.tenantId, tenantId),
+        eq(inviteSms.status, 'QUEUED'),
+        or(isNull(inviteSms.claimedAt), lt(inviteSms.claimedAt, staleBefore)),
+      ),
+    )
+    .for('update', { of: inviteSms, skipLocked: true })
+    .limit(CLAIM_BATCH);
 
-  let invites = 0;
-  let failed = 0;
+  const jobs: InviteJob[] = [];
+  const claimedIds: string[] = [];
+  const failedIds: string[] = [];
+
   for (const row of due) {
     const packed = asBuffer(row.bodyCiphertext);
-    if (!packed) {
-      await markInviteSms(tx, tenantId, row.id, 'FAILED', 'none');
-      failed += 1;
+    if (!packed || !row.phone) {
+      failedIds.push(row.id);
       continue;
     }
     let url: string;
     try {
       url = decryptDeliveryOtp(packed, options.encryptionKey);
     } catch {
-      await markInviteSms(tx, tenantId, row.id, 'FAILED', 'none');
-      failed += 1;
+      failedIds.push(row.id);
       continue;
     }
-    const [invite] = await tx
-      .select({ identityId: guardianInvite.identityId })
-      .from(guardianInvite)
-      .where(and(eq(guardianInvite.id, row.inviteId), eq(guardianInvite.tenantId, tenantId)));
-    if (!invite) {
-      await markInviteSms(tx, tenantId, row.id, 'FAILED', 'none');
-      failed += 1;
-      continue;
-    }
-    const [person] = await tx
-      .select({ phone: identity.phoneE164 })
-      .from(identity)
-      .where(eq(identity.id, invite.identityId));
-    if (!person?.phone) {
-      await markInviteSms(tx, tenantId, row.id, 'FAILED', 'none');
-      failed += 1;
-      continue;
-    }
-    const sent = await options.sms.send({
-      toE164: person.phone,
-      body: `ServisApp veli daveti: ${url}`,
-    });
-    if (sent.ok) {
-      await markInviteSms(tx, tenantId, row.id, 'SENT', 'netgsm');
-      invites += 1;
-      continue;
-    }
-    if (sent.retry) continue;
-    await markInviteSms(tx, tenantId, row.id, 'FAILED', 'netgsm');
-    failed += 1;
+    jobs.push({ id: row.id, phone: row.phone, body: `ServisApp veli daveti: ${url}` });
+    claimedIds.push(row.id);
   }
-  return { notes: 0, invites, failed };
+
+  if (failedIds.length > 0) {
+    await tx
+      .update(inviteSms)
+      .set({ status: 'FAILED', provider: 'none', updatedAt: now, claimedAt: null })
+      .where(and(eq(inviteSms.tenantId, tenantId), inArray(inviteSms.id, failedIds)));
+  }
+  if (claimedIds.length > 0) {
+    await tx
+      .update(inviteSms)
+      .set({ claimedAt: now })
+      .where(and(eq(inviteSms.tenantId, tenantId), inArray(inviteSms.id, claimedIds)));
+  }
+  return { jobs, failed: failedIds.length };
 }
 
-async function deliverNotification(
+async function sendNotification(
+  job: NotificationJob,
+  options: OutboxOptions,
+): Promise<SendOutcome> {
+  if (job.kind === 'sms') {
+    if (!options.sms) return 'retry';
+    const sent = await options.sms.send({ toE164: job.phone, body: job.body });
+    if (sent.ok) return 'sent';
+    return sent.retry ? 'retry' : 'failed';
+  }
+  let anyOk = false;
+  let retry = false;
+  for (const to of job.tokens) {
+    const sent = await options.push.send({
+      to,
+      title: job.title,
+      body: job.body,
+      data: { type: job.type, tripId: job.tripId, studentId: job.studentId },
+    });
+    if (sent.ok) anyOk = true;
+    else if (sent.retry) retry = true;
+  }
+  if (anyOk) return 'sent';
+  return retry ? 'retry' : 'failed';
+}
+
+async function sendInvite(job: InviteJob, options: OutboxOptions): Promise<SendOutcome> {
+  if (!options.sms) return 'retry';
+  const sent = await options.sms.send({ toE164: job.phone, body: job.body });
+  if (sent.ok) return 'sent';
+  return sent.retry ? 'retry' : 'failed';
+}
+
+async function settleNotifications(
   tx: Database,
   tenantId: string,
-  row: {
-    id: string;
-    recipientMembershipId: string;
-    channel: 'PUSH' | 'SMS';
-    type: string;
-    tripId: string | null;
-    studentId: string | null;
-    refId: string | null;
-    createdAt: Date;
-  },
-  options: OutboxOptions,
-  now: Date,
-): Promise<'sent' | 'failed' | 'skipped'> {
-  const studentName = await loadStudentName(tx, tenantId, row.studentId);
-  const copy = composeNotification({ type: row.type, studentName });
-  const tokens = await loadPushTokens(tx, tenantId, row.recipientMembershipId);
-  const plan = planNotificationDelivery({
-    channel: row.channel,
-    hasPushToken: tokens.length > 0,
-    smsAvailable: options.sms !== null,
-    ageMs: now.getTime() - row.createdAt.getTime(),
-  });
-  switch (plan) {
-    case 'skip':
-      return 'skipped';
-    case 'fail':
-      await markNotification(tx, tenantId, row.id, 'FAILED');
-      return 'failed';
-    case 'sms': {
-      if (!options.sms) return 'skipped';
-      const body =
-        row.type === 'DELIVERY_OTP'
-          ? await loadOtpSmsBody(tx, tenantId, row.refId, options.encryptionKey, studentName)
-          : copy.body;
-      if (!body) {
-        await markNotification(tx, tenantId, row.id, 'FAILED');
-        return 'failed';
-      }
-      const phone = await loadMembershipPhone(tx, tenantId, row.recipientMembershipId);
-      if (!phone) {
-        await markNotification(tx, tenantId, row.id, 'FAILED');
-        return 'failed';
-      }
-      const sent = await options.sms.send({ toE164: phone, body });
-      if (sent.ok) {
-        await markNotification(tx, tenantId, row.id, 'SENT', row.channel === 'PUSH' ? 'SMS' : undefined);
-        return 'sent';
-      }
-      if (sent.retry) return 'skipped';
-      await markNotification(tx, tenantId, row.id, 'FAILED');
-      return 'failed';
-    }
-    case 'push': {
-      let anyOk = false;
-      let retry = false;
-      for (const to of tokens) {
-        const sent = await options.push.send({
-          to,
-          title: copy.title,
-          body: copy.body,
-          data: {
-            type: row.type,
-            tripId: row.tripId ?? '',
-            studentId: row.studentId ?? '',
-          },
-        });
-        if (sent.ok) anyOk = true;
-        else if (sent.retry) retry = true;
-      }
-      if (anyOk) {
-        await markNotification(tx, tenantId, row.id, 'SENT');
-        return 'sent';
-      }
-      if (retry) return 'skipped';
-      await markNotification(tx, tenantId, row.id, 'FAILED');
-      return 'failed';
-    }
-    default: {
-      const unexpected: never = plan;
-      return unexpected;
-    }
+  jobs: readonly NotificationJob[],
+  outcomes: ReadonlyMap<string, SendOutcome>,
+): Promise<void> {
+  const sentAt = new Date();
+  /**
+   * Sonuç yalnız HÂLÂ QUEUED olan satıra yazılır.
+   *
+   * Gönderim transaction dışında olduğu için bu aralıkta satır iptal edilmiş
+   * olabilir (şoför bindiyi geri aldı). Şartsız `status='SENT'` yazmak iptal
+   * edilmiş satırı diriltiyor ve geri alma akışının kaydını yalanlıyordu.
+   */
+  const stillQueued = eq(notification.status, 'QUEUED');
+  const smsFallback = jobs.filter(
+    (job) => job.channelBecomesSms && outcomes.get(job.id) === 'sent',
+  );
+  const sent = jobs.filter((job) => outcomes.get(job.id) === 'sent' && !job.channelBecomesSms);
+  const failed = jobs.filter((job) => outcomes.get(job.id) === 'failed');
+  const retry = jobs.filter((job) => outcomes.get(job.id) === 'retry');
+
+  if (smsFallback.length > 0) {
+    await tx
+      .update(notification)
+      .set({ status: 'SENT', sentAt, channel: 'SMS', claimedAt: null })
+      .where(
+        and(
+          eq(notification.tenantId, tenantId),
+          stillQueued,
+          inArray(
+            notification.id,
+            smsFallback.map((job) => job.id),
+          ),
+        ),
+      );
   }
+  if (sent.length > 0) {
+    await tx
+      .update(notification)
+      .set({ status: 'SENT', sentAt, claimedAt: null })
+      .where(
+        and(
+          eq(notification.tenantId, tenantId),
+          stillQueued,
+          inArray(
+            notification.id,
+            sent.map((job) => job.id),
+          ),
+        ),
+      );
+  }
+  if (failed.length > 0) {
+    await tx
+      .update(notification)
+      .set({ status: 'FAILED', sentAt: null, claimedAt: null })
+      .where(
+        and(
+          eq(notification.tenantId, tenantId),
+          stillQueued,
+          inArray(
+            notification.id,
+            failed.map((job) => job.id),
+          ),
+        ),
+      );
+  }
+  if (retry.length > 0) {
+    // QUEUED kalır, claim serbest bırakılır: bir sonraki tur yeniden dener.
+    await tx
+      .update(notification)
+      .set({ claimedAt: null })
+      .where(
+        and(
+          eq(notification.tenantId, tenantId),
+          inArray(
+            notification.id,
+            retry.map((job) => job.id),
+          ),
+        ),
+      );
+  }
+}
+
+async function settleInvites(
+  tx: Database,
+  tenantId: string,
+  outcomes: ReadonlyMap<string, SendOutcome>,
+): Promise<void> {
+  const now = new Date();
+  const byOutcome = (want: SendOutcome): string[] =>
+    [...outcomes.entries()].filter(([, outcome]) => outcome === want).map(([id]) => id);
+
+  const sent = byOutcome('sent');
+  if (sent.length > 0) {
+    await tx
+      .update(inviteSms)
+      .set({ status: 'SENT', provider: 'netgsm', updatedAt: now, claimedAt: null })
+      .where(and(eq(inviteSms.tenantId, tenantId), inArray(inviteSms.id, sent)));
+  }
+  const failed = byOutcome('failed');
+  if (failed.length > 0) {
+    await tx
+      .update(inviteSms)
+      .set({ status: 'FAILED', provider: 'netgsm', updatedAt: now, claimedAt: null })
+      .where(and(eq(inviteSms.tenantId, tenantId), inArray(inviteSms.id, failed)));
+  }
+  const retry = byOutcome('retry');
+  if (retry.length > 0) {
+    await tx
+      .update(inviteSms)
+      .set({ claimedAt: null })
+      .where(and(eq(inviteSms.tenantId, tenantId), inArray(inviteSms.id, retry)));
+  }
+}
+
+function distinct(values: readonly (string | null)[]): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === 'string'))];
 }
 
 async function loadPushTokens(
   tx: Database,
   tenantId: string,
-  membershipId: string,
-): Promise<string[]> {
-  const tokens = await tx
-    .select({ pushToken: device.pushToken })
+  membershipIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const byMembership = new Map<string, string[]>();
+  if (membershipIds.length === 0) return byMembership;
+  const rows = await tx
+    .select({ membershipId: device.membershipId, pushToken: device.pushToken })
     .from(device)
     .where(
       and(
         eq(device.tenantId, tenantId),
-        eq(device.membershipId, membershipId),
+        inArray(device.membershipId, [...membershipIds]),
         isNull(device.revokedAt),
       ),
     );
-  return tokens
-    .map((item) => item.pushToken)
-    .filter((token): token is string => typeof token === 'string' && token.length > 8);
+  for (const row of rows) {
+    if (typeof row.pushToken !== 'string' || row.pushToken.length <= 8) continue;
+    const list = byMembership.get(row.membershipId) ?? [];
+    list.push(row.pushToken);
+    byMembership.set(row.membershipId, list);
+  }
+  return byMembership;
 }
 
 async function loadOtpSmsBody(
@@ -301,75 +514,53 @@ async function loadOtpSmsBody(
 ): Promise<string | null> {
   if (!overrideId) return null;
   const [row] = await tx
-    .select({ ciphertext: deliveryOverride.otpCiphertext })
+    .select({
+      ciphertext: deliveryOverride.otpCiphertext,
+      receiverName: deliveryOverride.receiverName,
+    })
     .from(deliveryOverride)
     .where(and(eq(deliveryOverride.id, overrideId), eq(deliveryOverride.tenantId, tenantId)));
   const packed = asBuffer(row?.ciphertext);
   if (!packed) return null;
   try {
     const code = decryptDeliveryOtp(packed, encryptionKey);
-    return `${studentName} teslim kodu: ${code}`;
+    // Mesaj kodu alacak kişiye yazılır: kapıda şoföre söyleyeceği şey budur.
+    const who = row?.receiverName?.trim() ?? '';
+    const greeting = who.length > 0 ? `${who}, ` : '';
+    return `${greeting}${studentName} bugün size teslim edilecek. Şoföre söyleyeceğiniz ServisApp kodu: ${code}`;
   } catch {
     return null;
   }
 }
 
-async function loadStudentName(
+async function loadStudentNames(
   tx: Database,
   tenantId: string,
-  studentId: string | null,
-): Promise<string> {
-  if (!studentId) return 'Çocuğun';
-  const [row] = await tx
-    .select({ fullName: student.fullName })
+  studentIds: readonly string[],
+): Promise<Map<string, string>> {
+  if (studentIds.length === 0) return new Map();
+  const rows = await tx
+    .select({ id: student.id, fullName: student.fullName })
     .from(student)
-    .where(and(eq(student.id, studentId), eq(student.tenantId, tenantId)));
-  return row?.fullName ?? 'Çocuğun';
+    .where(and(eq(student.tenantId, tenantId), inArray(student.id, [...studentIds])));
+  return new Map(rows.map((row) => [row.id, row.fullName]));
 }
 
-async function loadMembershipPhone(
+async function loadMembershipPhones(
   tx: Database,
   tenantId: string,
-  membershipId: string,
-): Promise<string | null> {
-  const [row] = await tx
-    .select({ phone: identity.phoneE164 })
+  membershipIds: readonly string[],
+): Promise<Map<string, string>> {
+  if (membershipIds.length === 0) return new Map();
+  const rows = await tx
+    .select({ membershipId: tenantMembership.id, phone: identity.phoneE164 })
     .from(tenantMembership)
     .innerJoin(identity, eq(identity.id, tenantMembership.identityId))
-    .where(and(eq(tenantMembership.id, membershipId), eq(tenantMembership.tenantId, tenantId)));
-  return row?.phone ?? null;
-}
-
-async function markNotification(
-  tx: Database,
-  tenantId: string,
-  id: string,
-  status: 'SENT' | 'FAILED',
-  channel?: 'PUSH' | 'SMS',
-): Promise<void> {
-  await tx
-    .update(notification)
-    .set({
-      status,
-      sentAt: status === 'SENT' ? new Date() : null,
-      ...(channel ? { channel } : {}),
-    })
-    .where(and(eq(notification.id, id), eq(notification.tenantId, tenantId)));
-}
-
-async function markInviteSms(
-  tx: Database,
-  tenantId: string,
-  id: string,
-  status: 'SENT' | 'FAILED',
-  provider: string,
-): Promise<void> {
-  await tx
-    .update(inviteSms)
-    .set({
-      status,
-      provider,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(inviteSms.id, id), eq(inviteSms.tenantId, tenantId)));
+    .where(
+      and(
+        eq(tenantMembership.tenantId, tenantId),
+        inArray(tenantMembership.id, [...membershipIds]),
+      ),
+    );
+  return new Map(rows.map((row) => [row.membershipId, row.phone]));
 }

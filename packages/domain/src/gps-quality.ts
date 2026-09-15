@@ -45,9 +45,7 @@ export interface LastGoodFix extends LatLng {
 }
 
 export type GpsQualityVerdict =
-  | { quality: 'GOOD' }
-  | { quality: 'LOW' }
-  | { quality: 'REJECTED'; reason: GpsRejectReason };
+  { quality: 'GOOD' } | { quality: 'LOW' } | { quality: 'REJECTED'; reason: GpsRejectReason };
 
 /**
  * Kalite filtresi (SPEC §8). Yetki (epoch/cihaz/sefer) buraya gelmez.

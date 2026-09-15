@@ -18,15 +18,35 @@ export const createStopInput = z.object({
 });
 export type CreateStopInput = z.infer<typeof createStopInput>;
 
+/** Kiracı saat dilimindeki kalkış duvar saati. */
+export const departureLocalTime = z
+  .string()
+  .trim()
+  .regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, 'Kalkış saati SS:DD olmalı');
+
 export const createRouteInput = z.object({
   vehicleId: uuid,
   schoolId: uuid,
   segment: tripSegment,
   shiftNo: z.number().int().min(1).max(10).default(1),
   maxDetourM: z.number().int().min(0).max(20_000).default(1500),
+  departureLocalTime: departureLocalTime.optional(),
   effectiveFrom: z.iso.date(),
 });
 export type CreateRouteInput = z.infer<typeof createRouteInput>;
+
+export const updateRouteDepartureInput = z.object({
+  departureLocalTime,
+});
+export type UpdateRouteDepartureInput = z.infer<typeof updateRouteDepartureInput>;
+
+export const routeLifecycle = z.enum(['ACTIVE', 'RETIRED']);
+export type RouteLifecycle = z.infer<typeof routeLifecycle>;
+
+export const updateRouteLifecycleInput = z.object({
+  status: routeLifecycle,
+});
+export type UpdateRouteLifecycleInput = z.infer<typeof updateRouteLifecycleInput>;
 
 export const routeStopDraftInput = z.object({
   stopId: uuid,

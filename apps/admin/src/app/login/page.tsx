@@ -3,10 +3,11 @@
 import { useRouter } from 'next/navigation';
 import { useState, type FormEvent } from 'react';
 import { discardLegacyBrowserToken, type SessionBody } from '@/lib/session';
+import { authConfigured, signInWithPassword } from '@/lib/supabase';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('admin@demo.local');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -17,11 +18,17 @@ export default function LoginPage() {
     setError(null);
     discardLegacyBrowserToken();
     try {
+      // Supabase kuruluysa kimlik doğrulaması orada yapılır ve yalnız jeton
+      // sunucuya verilir; jeton httpOnly çerezle takas edilir. Yerel kurulumda
+      // Supabase yoksa geliştirici parola yolu kullanılır.
+      const payload = authConfigured()
+        ? { accessToken: await signInWithPassword(email, password) }
+        : { email, password };
       const login = await fetch('/api/session/login', {
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(payload),
       });
       const body = (await login.json()) as SessionBody & { message?: string; error?: string };
       if (!login.ok) {
@@ -45,7 +52,9 @@ export default function LoginPage() {
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6">
       <p className="font-serif text-3xl">ServisApp</p>
-      <p className="mt-2 text-sm text-muted">Saha masası — kayıt admin’de, veli yalnız aktive olur.</p>
+      <p className="mt-2 text-sm text-muted">
+        Saha masası — kayıt admin’de, veli yalnız aktive olur.
+      </p>
       <form onSubmit={(event) => void submit(event)} className="mt-8 flex flex-col gap-3">
         <label className="text-sm">
           E-posta

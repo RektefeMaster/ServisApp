@@ -52,3 +52,25 @@ operasyonel gerçekleri ezmez. Tablo `packages/domain` içindedir.
 `event` append-only denetim izidir. `command_receipt` komut makbuzudur
 (`PENDING` transaction rollback olursa kaybolur). Hedefinden önce gelen geri alma
 `pending_command_dependency` tombstone'una yazılır.
+
+## Kimlik: bilerek verilmiş iki karar
+
+**Kimlik küresel, üyelik kiracıya aittir.** `identity.phone_e164` tüm sistemde
+tekildir. Bunun iki bilinen sonucu var; ikisi de ürün kararıdır, hata değil.
+
+1. **Personel daveti ilk girişte ACTIVE olur.** Bir yönetici telefon numarası
+   ekleyip DRIVER/ATTENDANT/ADMIN rolü verdiğinde, o kişi bir sonraki girişinde
+   (başka bir şirket için giriyor olsa bile) o üyeliğe ACTIVE olarak bağlanır —
+   ayrıca bir kabul adımı yoktur. Veli tarafı böyle DEĞİLDİR: GUARDIAN üyeliği
+   yalnız davet jetonunun aktivasyonuyla açılır (migration 0022). Personel için
+   de açık kabul istenirse `resolve_session`'daki otomatik ACTIVE bloğu
+   kaldırılır ve personel davet akışı eklenir; bu, saha kurulumunu yavaşlatan
+   bir ürün değişikliğidir, tek satırlık bir düzeltme değil.
+
+2. **`phone_in_use` bir varlık kehanetidir.** Bir yönetici, sistemde zaten
+   kayıtlı bir numarayı eklemeye çalışınca bu hatayı alır ve numaranın
+   _bir yerde_ kayıtlı olduğunu öğrenir. Kimin olduğunu öğrenemez: çapraz
+   kiracı kimlik adı ve id'si maskelenir (`classifyRow`,
+   `resolveGuardianIdentity`); başka şirketteki kimliğe bağlanmak yalnız açık
+   `reuseIdentityId` ile mümkündür ve o id dışarıya hiç verilmez. Küresel tekil
+   telefon kısıtının kaçınılmaz yan etkisidir.

@@ -62,9 +62,18 @@ async function proxy(
 
   const init: RequestInit = { method: request.method, headers };
   if (request.method !== 'GET' && request.method !== 'HEAD') {
-    init.body = await request.arrayBuffer();
+    const raw = await request.arrayBuffer();
+    if (raw.byteLength > 0) {
+      init.body = raw;
+    } else {
+      // Boş gövdeyle content-type göndermek karşı tarafta geçersiz istektir.
+      headers.delete('content-type');
+      headers.delete('content-length');
+    }
   }
-  const upstream = await fetch(target, init);
+  // Zaman aşımı yoksa yavaş bir sorgu Next sürecinin soket havuzunu tüketir ve
+  // panel bütün operatörler için yanıt vermez olur.
+  const upstream = await fetch(target, { ...init, signal: AbortSignal.timeout(20_000) });
   const body = await upstream.arrayBuffer();
   const responseHeaders = new Headers();
   const contentType = upstream.headers.get('content-type');

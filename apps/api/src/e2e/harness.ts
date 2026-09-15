@@ -60,6 +60,10 @@ export async function startE2ePostgres(): Promise<E2ePostgres> {
   await applyMigrations(url);
   const sql = postgres(url, { max: 6, prepare: false, onnotice: () => {} });
   await enableAppLogins(sql);
+  // Geliştirme girişi üretimde varsayılan olarak KAPALIDIR (bkz. 0041). E2E
+  // sahadaki personel/veli giriş yolunu bu bayrakla açar; `servisapp_api`
+  // kendisi açamaz, bu yüzden migration bağlantısından yazılır.
+  await sql`update platform_settings set dev_login_enabled = true where id = true`;
   return {
     url,
     sql,

@@ -8,6 +8,7 @@ import { createPostgresData } from '../data/postgres.js';
 import type { AppData } from '../data/ports.js';
 import type { Env } from '../env.js';
 import { runTripHorizonJob } from '../jobs/horizon.js';
+import { runOutboxJob } from '../jobs/outbox.js';
 import { startE2ePostgres, stopE2ePostgres, type E2ePostgres } from './harness.js';
 
 /**
@@ -395,9 +396,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       tripStudentId: input.tripStudentId,
       action: input.action,
       expectedStateSeq: input.expectedStateSeq,
-      ...(input.receiverMembershipId
-        ? { receiverMembershipId: input.receiverMembershipId }
-        : {}),
+      ...(input.receiverMembershipId ? { receiverMembershipId: input.receiverMembershipId } : {}),
     });
   }
 
@@ -456,6 +455,51 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
   ): void {
     expect(response.status, JSON.stringify(response.body)).toBe(status);
     expect(response.body['error']).toBe(error);
+  }
+
+  /**
+   * Outbox'ı gerçekten çalıştırır ve giden SMS'leri toplar. Teslim kodu artık
+   * veli yanıtında dönmediği için testin kodu öğrenmesinin tek yolu budur —
+   * ve bu, sahadaki yolun aynısıdır.
+   */
+  async function drainSms(): Promise<Array<{ toE164: string; body: string }>> {
+    const sent: Array<{ toE164: string; body: string }> = [];
+    await runOutboxJob(workerSql, {
+      encryptionKey: env.OTP_ENCRYPTION_KEY,
+      push: {
+        send: () => Promise.resolve({ ok: false as const, retry: false, reason: 'no-push' }),
+      },
+      sms: {
+        send: (message: { toE164: string; body: string }) => {
+          sent.push(message);
+          return Promise.resolve({ ok: true as const });
+        },
+      },
+    });
+    return sent;
+  }
+
+  /** Bir numaraya giden SMS'lerin içindeki 6 haneli kodlar. */
+  function codesSentTo(
+    messages: ReadonlyArray<{ toE164: string; body: string }>,
+    phone: string,
+  ): string[] {
+    return messages
+      .filter((item) => item.toE164 === phone)
+      .flatMap((item) => [...item.body.matchAll(/\b\d{6}\b/g)].map((match) => match[0] ?? ''));
+  }
+
+  function otpSentTo(
+    messages: ReadonlyArray<{ toE164: string; body: string }>,
+    phone: string,
+  ): string {
+    const message = messages.find((item) => item.toE164 === phone);
+    if (!message) {
+      throw new Error(`${phone} numarasına SMS gitmedi: ${JSON.stringify(messages)}`);
+    }
+    const match = /(\d{6})/.exec(message.body);
+    if (!match?.[1]) throw new Error(`kod okunamadı: ${message.body}`);
+    return match[1];
   }
 
   function tripByRoute(items: Record<string, unknown>[], routeId: string): Record<string, unknown> {
@@ -2800,7 +2844,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       clientEventId: randomUUID(),
       tripStudentId: adaId,
       action: 'MARK_NO_SHOW',
-      expectedStateSeq: Number(studentRow(afterDrain.body['students'], world.adaStudentId)['stateSeq']),
+      expectedStateSeq: Number(
+        studentRow(afterDrain.body['students'], world.adaStudentId)['stateSeq'],
+      ),
     });
     expect(noShowAgain.status).toBe(200);
     expect(noShowAgain.body).toMatchObject({ status: 'APPLIED', state: 'NO_SHOW' });
@@ -4424,16 +4470,30 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(created.status, JSON.stringify(created.body)).toBe(200);
     expect(created.body['status']).toBe('ACTIVE');
-    const otpCode = requireString(created.body, 'otpCode');
-    expect(otpCode).toMatch(/^\d{6}$/);
+    // Veli kodun kendisini görmez; yalnız kime gittiğini görür.
+    expect(created.body['otpCode']).toBeUndefined();
+    expect(created.body['otpSentTo']).toBe('***0077');
     const overrideId = requireString(created.body, 'id');
+
+    // Kod, çocuğu alacak kişinin numarasına gider.
+    const firstSms = await drainSms();
+    const otpCode = otpSentTo(firstSms, '+905321110077');
+    expect(otpCode).toMatch(/^\d{6}$/);
+    // Veliye bilgi SMS'i düşebilir ama içinde kod OLMAZ.
+    expect(codesSentTo(firstSms, GUNES.guardian.phone)).toEqual([]);
+    const receiverSms = firstSms.find((item) => item.toE164 === '+905321110077');
+    expect(receiverSms?.body).toContain('Mehmet Demir');
+
     const resent = await asUser(
       'POST',
       `/v1/parent/delivery-overrides/${overrideId}/resend`,
       parent,
     );
     expect(resent.status, JSON.stringify(resent.body)).toBe(200);
-    expect(resent.body['otpCode']).toBe(otpCode);
+    expect(resent.body['otpCode']).toBeUndefined();
+    expect(resent.body['otpSentTo']).toBe('***0077');
+    const resentSms = await drainSms();
+    expect(otpSentTo(resentSms, '+905321110077')).toBe(otpCode);
 
     const { morningId, afternoonId } = await generateDay(serviceDate);
     const hasan = await hasanCrew();
@@ -4518,7 +4578,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(delivered.body['status']).toBe('APPLIED');
   });
 
-  it('uzak pin yönetici onayı ister; onaydan sonra TEMP ve veli kodu görünür', async () => {
+  it('uzak pin yönetici onayı ister; onaydan sonra TEMP ve kod alıcıya gider', async () => {
     const serviceDate = exceptionDate(4);
     const { afternoonId } = await generateDay(serviceDate);
     const hasan = await hasanCrew();
@@ -4537,7 +4597,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     });
     expect(created.status, JSON.stringify(created.body)).toBe(200);
     expect(created.body['status']).toBe('PENDING_APPROVAL');
-    expect(created.body['otpCode']).toBeNull();
+    // Onay beklerken kod üretilmez, dolayısıyla kimseye gitmez.
+    expect(created.body['otpSentTo']).toBeNull();
+    expect(codesSentTo(await drainSms(), '+905321110078')).toEqual([]);
     expect(Number(created.body['detourM'])).toBeGreaterThan(Number(created.body['maxDetourM']));
     const overrideId = requireString(created.body, 'id');
 
@@ -4552,6 +4614,11 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     );
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
     assertNoOtpSecret(approved.body);
+
+    // Onaydan sonra kod, velinin belirlediği alıcının numarasına gider.
+    const sms = await drainSms();
+    expect(otpSentTo(sms, '+905321110078')).toMatch(/^\d{6}$/);
+    expect(codesSentTo(sms, GUNES.guardian.phone)).toEqual([]);
 
     const after = await asUser('GET', `/v1/trips/${afternoonId}`, hasan);
     expect(after.status).toBe(200);
@@ -4570,7 +4637,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(isRecord(override)).toBe(true);
     if (isRecord(override)) {
       expect(override['status']).toBe('ACTIVE');
-      expect(asText(override['otpCode'])).toMatch(/^\d{6}$/);
+      // Veliye kodun kendisi değil, kime gittiği gösterilir.
+      expect(override['otpCode']).toBeUndefined();
+      expect(override['otpSentTo']).toBe('***0078');
     }
   });
 
@@ -4600,9 +4669,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
 
     const after = await asUser('GET', `/v1/trips/${afternoonId}`, hasan);
-    expect(
-      asText(studentRow(after.body['students'], world.studentId)['snapshotDropoffText']),
-    ).toBe(snapshot);
+    expect(asText(studentRow(after.body['students'], world.studentId)['snapshotDropoffText'])).toBe(
+      snapshot,
+    );
     const [row] = await postgres.sql<{ text: string }[]>`
       select a.text
       from student_address sa
@@ -4700,8 +4769,9 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expect(isRecord(day.body['deliveryOverride'])).toBe(true);
     if (isRecord(day.body['deliveryOverride'])) {
       expect(day.body['deliveryOverride']['status']).toBe('ACTIVE');
-      expect(asText(day.body['deliveryOverride']['otpCode'])).toMatch(/^\d{6}$/);
+      expect(day.body['deliveryOverride']['otpSentTo']).toBe('***0081');
     }
+    expect(otpSentTo(await drainSms(), '+905321110081')).toMatch(/^\d{6}$/);
   });
 
   it('istisna iptali PLANLI seferde EXPECTED geri getirir', async () => {
@@ -4769,7 +4839,7 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     assertNoOtpSecret(detail.body);
   });
 
-  it('farklı teslimat iptali PLANLI seferde evi geri verir; araçtayken reddedilir', async () => {
+  it('farklı teslimat iptali PLANLI seferde evi geri verir; araçtayken iptal ve yeni talep reddedilir', async () => {
     const plannedDate = exceptionDate(11);
     const parent = await ayseParent();
     const created = await asUser('POST', '/v1/parent/delivery-overrides', parent, {
@@ -4828,6 +4898,78 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
     expectError(denied, 409, 'student_on_board');
     const stillTemp = await asUser('GET', `/v1/trips/${liveAfternoonId}`, hasan);
     expect(studentRow(stillTemp.body['students'], world.studentId)['deliveryTarget']).toBe('TEMP');
+
+    // Çocuk bindikten sonra YENİ talep de yazılmaz. Kontrol eskiden yalnız onay
+    // anındaydı: sapması büyük talep sessizce "onay bekliyor" olarak kaydediliyor,
+    // veli kod beklerken yönetici onaylayamadığı bir satırla kalıyordu.
+    const tooLate = await asUser('POST', '/v1/parent/delivery-overrides', parent, {
+      studentId: world.studentId,
+      serviceDate: boardedDate,
+      lat: 40.9725,
+      lng: 29.0765,
+      addressText: 'Erenköy Mah. bindikten sonra',
+      receiverName: 'Mehmet Demir',
+      receiverPhone: '+905321110084',
+    });
+    expectError(tooLate, 409, 'student_on_board');
+  });
+
+  it('kalkıştan sonra devralan şoför seferi görür; devreden şoför göremez', async () => {
+    const admin = await selinAdmin();
+    // Kalkışı kesin olarak geçmişte kalan bir gün: yedek şoför yolda devralıyor.
+    const pastDate = '2026-09-09';
+    expect(pastDate < istanbulToday()).toBe(true);
+    const generated = await asUser('POST', '/v1/admin/trips/generate', admin, {
+      fromDate: pastDate,
+      days: 1,
+    });
+    expect(generated.status, JSON.stringify(generated.body)).toBe(200);
+    const listed = await asUser('GET', `/v1/trips?date=${pastDate}`, admin);
+    expect(listed.status).toBe(200);
+    const tripId = requireString(tripByRoute(requireItems(listed.body), world.routeId), 'id');
+
+    const hasan = await hasanCrew();
+    const hasanBefore = await asUser('GET', `/v1/trips/${tripId}`, hasan);
+    expect(hasanBefore.status, JSON.stringify(hasanBefore.body)).toBe(200);
+
+    const yedek = await asUser('POST', '/v1/admin/staff', admin, {
+      fullName: 'Kemal Doğan',
+      phone: '+905321110021',
+      email: 'kemal.dogan@gunesis.net',
+      role: 'DRIVER',
+    });
+    expect(yedek.status, JSON.stringify(yedek.body)).toBe(200);
+    const yedekMembershipId = requireString(yedek.body, 'membershipId');
+    const yedekToken = await mint({
+      sub: randomUUID(),
+      phone: '+905321110021',
+      email: 'kemal.dogan@gunesis.net',
+    });
+    const yedekSession = await asUser('GET', '/v1/session', { token: yedekToken, client: 'crew' });
+    expect(yedekSession.status, JSON.stringify(yedekSession.body)).toBe(200);
+    const yedekCrew = crewActor(yedekToken, randomUUID());
+
+    const yedekBefore = await asUser('GET', `/v1/trips/${tripId}`, yedekCrew);
+    expectError(yedekBefore, 404, 'not_found');
+
+    const handover = await asUser('POST', `/v1/admin/trips/${tripId}/crew`, admin, {
+      role: 'DRIVER',
+      membershipId: yedekMembershipId,
+      reason: 'Hasan yolda rahatsızlandı; Kemal devraldı',
+    });
+    expect(handover.status, JSON.stringify(handover.body)).toBe(200);
+
+    const yedekDetail = await asUser('GET', `/v1/trips/${tripId}`, yedekCrew);
+    expect(yedekDetail.status, JSON.stringify(yedekDetail.body)).toBe(200);
+    const yedekList = await asUser('GET', `/v1/trips?date=${pastDate}`, yedekCrew);
+    expect(yedekList.status).toBe(200);
+    expect(requireItems(yedekList.body).map((row) => row['id'])).toContain(tripId);
+
+    const hasanAfter = await asUser('GET', `/v1/trips/${tripId}`, hasan);
+    expectError(hasanAfter, 404, 'not_found');
+    const hasanList = await asUser('GET', `/v1/trips?date=${pastDate}`, hasan);
+    expect(hasanList.status).toBe(200);
+    expect(requireItems(hasanList.body).map((row) => row['id'])).not.toContain(tripId);
   });
 
   it('sefer aracı/personel değişir, transfer zirve doluluğa bakar, olay ve öncelik dolar', async () => {
@@ -5079,5 +5221,753 @@ describe('Kadıköy Güneş Işığı — ilk kurulum günü', { timeout: 300_00
       reason: 'Araçtayken transfer denemesi',
     });
     expectError(denied, 409, 'student_on_board');
+  });
+
+  it('sonradan ilan edilen tatil üretilmiş seferi iptal eder', async () => {
+    const admin = await selinAdmin();
+    const snowDay = exceptionDate(40);
+    const { morningId, afternoonId } = await generateDay(snowDay);
+    const before = await asUser('GET', `/v1/trips?date=${snowDay}`, admin);
+    expect(before.status).toBe(200);
+    const beforeStates = new Map(requireItems(before.body).map((row) => [row['id'], row['state']]));
+    expect(beforeStates.get(morningId)).toBe('PLANNED');
+    expect(beforeStates.get(afternoonId)).toBe('PLANNED');
+
+    // Kar tatili akşamdan ilan edilir; sefer çoktan üretilmiştir.
+    const holiday = await asUser(
+      'POST',
+      `/v1/admin/schools/${world.schoolId}/calendar-days`,
+      admin,
+      { date: snowDay, type: 'HOLIDAY' },
+    );
+    expect(holiday.status, JSON.stringify(holiday.body)).toBe(200);
+
+    const after = await asUser('GET', `/v1/trips?date=${snowDay}`, admin);
+    expect(after.status).toBe(200);
+    const afterStates = new Map(requireItems(after.body).map((row) => [row['id'], row['state']]));
+    expect(afterStates.get(morningId)).toBe('CANCELLED');
+    expect(afterStates.get(afternoonId)).toBe('CANCELLED');
+
+    const hasan = await hasanCrew();
+    const crewList = await asUser('GET', `/v1/trips?date=${snowDay}`, hasan);
+    expect(crewList.status).toBe(200);
+    expect(requireItems(crewList.body).every((row) => row['state'] === 'CANCELLED')).toBe(true);
+
+    const [cancelEvent] = await postgres.sql<{ n: string }[]>`
+      select count(*)::text as n from event
+      where trip_id = ${morningId}::uuid and event_type = 'TRIP_CANCELLED'
+    `;
+    expect(Number(cancelEvent?.n ?? '0')).toBeGreaterThan(0);
+  });
+
+  it('yeni rota sürümü üretilmiş gelecek seferi yeni plana çeker', async () => {
+    const admin = await selinAdmin();
+    const vehicleRes = await asUser('POST', '/v1/admin/vehicles', admin, {
+      plate: '34 GNS 34',
+      seatCount: 16,
+    });
+    expect(vehicleRes.status).toBe(200);
+    const vehicleId = requireString(vehicleRes.body, 'id');
+
+    const addrRes = await asUser('POST', '/v1/admin/addresses', admin, {
+      text: 'Osmanağa Mah. Söğütlüçeşme Cd. No:41',
+      il: 'İstanbul',
+      ilce: 'Kadıköy',
+      lat: 40.9905,
+      lng: 29.0281,
+    });
+    expect(addrRes.status).toBe(200);
+    const addressId = requireString(addrRes.body, 'id');
+    const studentRes = await asUser('POST', '/v1/admin/students', admin, {
+      fullName: 'Poyraz Aksu',
+      schoolId: world.schoolId,
+      grade: '2-C',
+      handoverPolicy: 'GUARDIAN_REQUIRED',
+      enrollmentStart: '2026-09-01',
+      pickupAddressId: addressId,
+      dropoffAddressId: addressId,
+    });
+    expect(studentRes.status, JSON.stringify(studentRes.body)).toBe(200);
+    const studentId = requireString(studentRes.body, 'id');
+
+    const firstStop = await asUser('POST', '/v1/admin/stops', admin, {
+      addressId,
+      label: 'Söğütlüçeşme ilk kapı',
+      lat: 40.9906,
+      lng: 29.0282,
+    });
+    expect(firstStop.status).toBe(200);
+    const firstStopId = requireString(firstStop.body, 'id');
+    const secondStop = await asUser('POST', '/v1/admin/stops', admin, {
+      addressId,
+      label: 'Söğütlüçeşme yeni kapı',
+      lat: 40.9908,
+      lng: 29.0285,
+    });
+    expect(secondStop.status).toBe(200);
+    const secondStopId = requireString(secondStop.body, 'id');
+
+    const routeRes = await asUser('POST', '/v1/admin/routes', admin, {
+      vehicleId,
+      schoolId: world.schoolId,
+      segment: 'MORNING',
+      shiftNo: 1,
+      effectiveFrom: '2026-09-09',
+    });
+    expect(routeRes.status, JSON.stringify(routeRes.body)).toBe(200);
+    const routeId = requireString(routeRes.body, 'id');
+    const draftOne = requireString(routeRes.body, 'draftVersionId');
+    const filledOne = await asUser('PUT', `/v1/admin/route-versions/${draftOne}/stops`, admin, {
+      stops: [
+        { stopId: firstStopId, kind: 'PICKUP', seq: 1, studentIds: [studentId] },
+        { stopId: world.schoolStopId, kind: 'SCHOOL', seq: 2, studentIds: [] },
+      ],
+    });
+    expect(filledOne.status, JSON.stringify(filledOne.body)).toBe(200);
+    const publishedOne = await asUser(
+      'POST',
+      `/v1/admin/route-versions/${draftOne}/publish`,
+      admin,
+    );
+    expect(publishedOne.status, JSON.stringify(publishedOne.body)).toBe(200);
+    const versionOneId = requireString(publishedOne.body, 'id');
+
+    const planDate = exceptionDate(42);
+    const generated = await asUser('POST', '/v1/admin/trips/generate', admin, {
+      fromDate: planDate,
+      days: 1,
+    });
+    expect(generated.status).toBe(200);
+    const listed = await asUser('GET', `/v1/trips?date=${planDate}`, admin);
+    const tripId = requireString(tripByRoute(requireItems(listed.body), routeId), 'id');
+    const detailBefore = await asUser('GET', `/v1/trips/${tripId}`, admin);
+    expect(detailBefore.status).toBe(200);
+    expect(requireStops(detailBefore.body).map((row) => row['label'])).toEqual([
+      'Söğütlüçeşme ilk kapı',
+      'Güneş İlkokulu kapı',
+    ]);
+
+    // Kapı taşındı: yeni sürüm bugünden geçerli, ama sefer zaten üretilmişti.
+    const cloned = await asUser('POST', `/v1/admin/routes/${routeId}/versions`, admin, {
+      effectiveFrom: istanbulToday(),
+    });
+    expect(cloned.status, JSON.stringify(cloned.body)).toBe(200);
+    const draftTwo = requireString(cloned.body, 'id');
+    const filledTwo = await asUser('PUT', `/v1/admin/route-versions/${draftTwo}/stops`, admin, {
+      stops: [
+        { stopId: secondStopId, kind: 'PICKUP', seq: 1, studentIds: [studentId] },
+        { stopId: world.schoolStopId, kind: 'SCHOOL', seq: 2, studentIds: [] },
+      ],
+    });
+    expect(filledTwo.status, JSON.stringify(filledTwo.body)).toBe(200);
+    const publishedTwo = await asUser(
+      'POST',
+      `/v1/admin/route-versions/${draftTwo}/publish`,
+      admin,
+    );
+    expect(publishedTwo.status, JSON.stringify(publishedTwo.body)).toBe(200);
+    const versionTwoId = requireString(publishedTwo.body, 'id');
+    expect(versionTwoId).not.toBe(versionOneId);
+
+    const detailAfter = await asUser('GET', `/v1/trips/${tripId}`, admin);
+    expect(detailAfter.status, JSON.stringify(detailAfter.body)).toBe(200);
+    expect(requireStops(detailAfter.body).map((row) => row['label'])).toEqual([
+      'Söğütlüçeşme yeni kapı',
+      'Güneş İlkokulu kapı',
+    ]);
+    expect(studentRow(detailAfter.body['students'], studentId)['state']).toBe('EXPECTED');
+    const [versionRow] = await postgres.sql<{ route_version_id: string }[]>`
+      select route_version_id from trip where id = ${tripId}::uuid
+    `;
+    expect(versionRow?.route_version_id).toBe(versionTwoId);
+
+    const [rebuiltEvent] = await postgres.sql<{ n: string }[]>`
+      select count(*)::text as n from event
+      where trip_id = ${tripId}::uuid and event_type = 'TRIP_REBUILT'
+    `;
+    expect(Number(rebuiltEvent?.n ?? '0')).toBeGreaterThan(0);
+  });
+
+  it('rota kendi kalkış saatini taşır; saat değişince üretilmiş sefer de kayar', async () => {
+    const admin = await selinAdmin();
+    const vehicleRes = await asUser('POST', '/v1/admin/vehicles', admin, {
+      plate: '34 GNS 55',
+      seatCount: 16,
+    });
+    expect(vehicleRes.status).toBe(200);
+    const vehicleId = requireString(vehicleRes.body, 'id');
+
+    const addrRes = await asUser('POST', '/v1/admin/addresses', admin, {
+      text: 'Caferağa Mah. Moda Cd. No:12',
+      il: 'İstanbul',
+      ilce: 'Kadıköy',
+      lat: 40.9845,
+      lng: 29.0268,
+    });
+    expect(addrRes.status).toBe(200);
+    const addressId = requireString(addrRes.body, 'id');
+    const studentRes = await asUser('POST', '/v1/admin/students', admin, {
+      fullName: 'Tuna Erol',
+      schoolId: world.schoolId,
+      grade: '4-B',
+      handoverPolicy: 'GUARDIAN_REQUIRED',
+      enrollmentStart: '2026-09-01',
+      pickupAddressId: addressId,
+      dropoffAddressId: addressId,
+    });
+    expect(studentRes.status, JSON.stringify(studentRes.body)).toBe(200);
+    const studentId = requireString(studentRes.body, 'id');
+    const stopRes = await asUser('POST', '/v1/admin/stops', admin, {
+      addressId,
+      label: 'Moda kapı',
+      lat: 40.9846,
+      lng: 29.0269,
+    });
+    expect(stopRes.status).toBe(200);
+
+    // İkinci vardiya 06:30 çıkar; varsayılan 07:00 değildir.
+    const routeRes = await asUser('POST', '/v1/admin/routes', admin, {
+      vehicleId,
+      schoolId: world.schoolId,
+      segment: 'MORNING',
+      shiftNo: 1,
+      departureLocalTime: '06:30',
+      effectiveFrom: '2026-09-09',
+    });
+    expect(routeRes.status, JSON.stringify(routeRes.body)).toBe(200);
+    const routeId = requireString(routeRes.body, 'id');
+    const draftId = requireString(routeRes.body, 'draftVersionId');
+    const filled = await asUser('PUT', `/v1/admin/route-versions/${draftId}/stops`, admin, {
+      stops: [
+        {
+          stopId: requireString(stopRes.body, 'id'),
+          kind: 'PICKUP',
+          seq: 1,
+          studentIds: [studentId],
+        },
+        { stopId: world.schoolStopId, kind: 'SCHOOL', seq: 2, studentIds: [] },
+      ],
+    });
+    expect(filled.status, JSON.stringify(filled.body)).toBe(200);
+    const publishRes = await asUser('POST', `/v1/admin/route-versions/${draftId}/publish`, admin);
+    expect(publishRes.status, JSON.stringify(publishRes.body)).toBe(200);
+
+    const detail = await asUser('GET', `/v1/admin/routes/${routeId}`, admin);
+    expect(detail.status).toBe(200);
+    expect(detail.body['departureLocalTime']).toBe('06:30');
+
+    const planDate = exceptionDate(44);
+    const generated = await asUser('POST', '/v1/admin/trips/generate', admin, {
+      fromDate: planDate,
+      days: 1,
+    });
+    expect(generated.status).toBe(200);
+    const listed = await asUser('GET', `/v1/trips?date=${planDate}`, admin);
+    const row = tripByRoute(requireItems(listed.body), routeId);
+    const tripId = requireString(row, 'id');
+    expect(new Date(requireString(row, 'plannedDepartureAt')).toISOString()).toBe(
+      `${planDate}T03:30:00.000Z`,
+    );
+
+    const bad = await asUser('PUT', `/v1/admin/routes/${routeId}/departure`, admin, {
+      departureLocalTime: '25:00',
+    });
+    expectError(bad, 400, 'invalid_body');
+
+    const moved = await asUser('PUT', `/v1/admin/routes/${routeId}/departure`, admin, {
+      departureLocalTime: '07:10',
+    });
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(moved.body['departureLocalTime']).toBe('07:10');
+
+    const after = await asUser('GET', `/v1/trips?date=${planDate}`, admin);
+    const movedRow = tripByRoute(requireItems(after.body), routeId);
+    expect(requireString(movedRow, 'id')).toBe(tripId);
+    expect(new Date(requireString(movedRow, 'plannedDepartureAt')).toISOString()).toBe(
+      `${planDate}T04:10:00.000Z`,
+    );
+  });
+
+  it('muayenesi geçmiş araçla sefer başlatılamaz; araç değişince başlar', async () => {
+    const admin = await selinAdmin();
+    const expired = await asUser('POST', '/v1/admin/vehicles', admin, {
+      plate: '34 GNS 77',
+      seatCount: 16,
+      inspectionExpiry: '2026-08-01',
+      insuranceExpiry: '2027-06-01',
+    });
+    expect(expired.status, JSON.stringify(expired.body)).toBe(200);
+    const expiredVehicleId = requireString(expired.body, 'id');
+    const healthy = await asUser('POST', '/v1/admin/vehicles', admin, {
+      plate: '34 GNS 78',
+      seatCount: 16,
+      inspectionExpiry: '2027-06-01',
+      insuranceExpiry: '2027-06-01',
+    });
+    expect(healthy.status).toBe(200);
+    const healthyVehicleId = requireString(healthy.body, 'id');
+
+    const serviceDate = exceptionDate(46);
+    const { morningId } = await generateDay(serviceDate);
+    const swapped = await asUser('POST', `/v1/admin/trips/${morningId}/vehicle`, admin, {
+      vehicleId: expiredVehicleId,
+      reason: 'Muayenesi geçmiş araç denemesi',
+    });
+    expect(swapped.status, JSON.stringify(swapped.body)).toBe(200);
+
+    const hasan = await hasanCrew();
+    const before = await asUser('POST', `/v1/trips/${morningId}/vehicle-checks`, hasan, {
+      phase: 'BEFORE',
+      vehicleEmptyConfirmed: true,
+    });
+    expectError(before, 409, 'vehicle_documents_expired');
+
+    const priorities = await asUser('GET', `/v1/admin/priorities?date=${serviceDate}`, admin);
+    expect(priorities.status).toBe(200);
+    expect(
+      requireItems(priorities.body).some(
+        (row) => row['kind'] === 'VEHICLE_DOCUMENT' && row['severity'] === 'CRITICAL',
+      ),
+    ).toBe(true);
+
+    // Kaçış kapısı "zorla başlat" değil, uygun aracı atamaktır.
+    const fixed = await asUser('POST', `/v1/admin/trips/${morningId}/vehicle`, admin, {
+      vehicleId: healthyVehicleId,
+      reason: 'Muayenesi geçerli araç verildi',
+    });
+    expect(fixed.status, JSON.stringify(fixed.body)).toBe(200);
+    const retry = await asUser('POST', `/v1/trips/${morningId}/vehicle-checks`, hasan, {
+      phase: 'BEFORE',
+      vehicleEmptyConfirmed: true,
+    });
+    expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+  });
+
+  it('askıya alınan personel yeniden ACTIVE olunca cihazı geri açılır', async () => {
+    const admin = await selinAdmin();
+    const staff = await asUser('POST', '/v1/admin/staff', admin, {
+      fullName: 'Serkan Yıldız',
+      phone: '+905321110023',
+      email: 'serkan.yildiz@gunesis.net',
+      role: 'DRIVER',
+    });
+    expect(staff.status, JSON.stringify(staff.body)).toBe(200);
+    const membershipId = requireString(staff.body, 'membershipId');
+    const token = await mint({
+      sub: randomUUID(),
+      phone: '+905321110023',
+      email: 'serkan.yildiz@gunesis.net',
+    });
+    const deviceId = randomUUID();
+    const crew = crewActor(token, deviceId);
+    const first = await asUser('GET', '/v1/session', crew);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    // Cihaz kaydı sefer uçlarında bağlanır; burada davranışı doğrudan kurarız.
+    await postgres.sql`
+      insert into device (id, tenant_id, membership_id, platform)
+      values (${deviceId}::uuid, ${world.gunes.tenantId}::uuid, ${membershipId}::uuid, 'ANDROID')
+    `;
+
+    const suspended = await asUser('POST', `/v1/admin/staff/${membershipId}/status`, admin, {
+      status: 'SUSPENDED',
+    });
+    expect(suspended.status, JSON.stringify(suspended.body)).toBe(200);
+    const [revokedRow] = await postgres.sql<{ n: string }[]>`
+      select count(*)::text as n from device
+      where membership_id = ${membershipId}::uuid and revoked_at is not null
+    `;
+    expect(Number(revokedRow?.n ?? '0')).toBeGreaterThan(0);
+
+    const back = await asUser('POST', `/v1/admin/staff/${membershipId}/status`, admin, {
+      status: 'ACTIVE',
+    });
+    expect(back.status, JSON.stringify(back.body)).toBe(200);
+    const [openRow] = await postgres.sql<{ n: string }[]>`
+      select count(*)::text as n from device
+      where membership_id = ${membershipId}::uuid and revoked_at is null
+    `;
+    expect(Number(openRow?.n ?? '0')).toBeGreaterThan(0);
+
+    // Yöneticinin tek tek iptal ettiği cihaz, üyelik geri açılsa da kapalı kalır.
+    const devices = await asUser('GET', `/v1/admin/staff/${membershipId}/devices`, admin);
+    expect(devices.status).toBe(200);
+    const target = requireItems(devices.body)[0];
+    if (target) {
+      const revoked = await asUser(
+        'POST',
+        `/v1/admin/devices/${requireString(target, 'deviceId')}/revoke`,
+        admin,
+      );
+      expect(revoked.status, JSON.stringify(revoked.body)).toBe(200);
+      const again = await asUser('POST', `/v1/admin/staff/${membershipId}/status`, admin, {
+        status: 'ACTIVE',
+      });
+      expect(again.status).toBe(200);
+      const [stillRevoked] = await postgres.sql<{ n: string }[]>`
+        select count(*)::text as n from device
+        where id = ${requireString(target, 'deviceId')}::uuid and revoked_at is not null
+      `;
+      expect(stillRevoked?.n).toBe('1');
+    }
+  });
+
+  it('emekliye ayrılan güzergâh sefer üretmez, yayın kabul etmez, planlıyı iptal eder', async () => {
+    const admin = await selinAdmin();
+    const vehicleRes = await asUser('POST', '/v1/admin/vehicles', admin, {
+      plate: '34 GNS 91',
+      seatCount: 16,
+    });
+    expect(vehicleRes.status).toBe(200);
+    const vehicleId = requireString(vehicleRes.body, 'id');
+    const addrRes = await asUser('POST', '/v1/admin/addresses', admin, {
+      text: 'Fikirtepe Mah. Eski Güzergâh Sk. No:3',
+      il: 'İstanbul',
+      ilce: 'Kadıköy',
+      lat: 40.9895,
+      lng: 29.0455,
+    });
+    expect(addrRes.status).toBe(200);
+    const addressId = requireString(addrRes.body, 'id');
+    const studentRes = await asUser('POST', '/v1/admin/students', admin, {
+      fullName: 'Mert Kaplan',
+      schoolId: world.schoolId,
+      grade: '1-D',
+      handoverPolicy: 'GUARDIAN_REQUIRED',
+      enrollmentStart: '2026-09-01',
+      pickupAddressId: addressId,
+      dropoffAddressId: addressId,
+    });
+    expect(studentRes.status, JSON.stringify(studentRes.body)).toBe(200);
+    const stopRes = await asUser('POST', '/v1/admin/stops', admin, {
+      addressId,
+      label: 'Fikirtepe kapı',
+      lat: 40.9896,
+      lng: 29.0456,
+    });
+    expect(stopRes.status).toBe(200);
+
+    const routeRes = await asUser('POST', '/v1/admin/routes', admin, {
+      vehicleId,
+      schoolId: world.schoolId,
+      segment: 'MORNING',
+      shiftNo: 1,
+      effectiveFrom: '2026-09-09',
+    });
+    expect(routeRes.status, JSON.stringify(routeRes.body)).toBe(200);
+    const routeId = requireString(routeRes.body, 'id');
+    const draftId = requireString(routeRes.body, 'draftVersionId');
+    const filled = await asUser('PUT', `/v1/admin/route-versions/${draftId}/stops`, admin, {
+      stops: [
+        {
+          stopId: requireString(stopRes.body, 'id'),
+          kind: 'PICKUP',
+          seq: 1,
+          studentIds: [requireString(studentRes.body, 'id')],
+        },
+        { stopId: world.schoolStopId, kind: 'SCHOOL', seq: 2, studentIds: [] },
+      ],
+    });
+    expect(filled.status, JSON.stringify(filled.body)).toBe(200);
+    expect(
+      (await asUser('POST', `/v1/admin/route-versions/${draftId}/publish`, admin)).status,
+    ).toBe(200);
+
+    const serviceDate = exceptionDate(48);
+    expect(
+      (
+        await asUser('POST', '/v1/admin/trips/generate', admin, {
+          fromDate: serviceDate,
+          days: 1,
+        })
+      ).status,
+    ).toBe(200);
+    const listed = await asUser('GET', `/v1/trips?date=${serviceDate}`, admin);
+    const tripId = requireString(tripByRoute(requireItems(listed.body), routeId), 'id');
+
+    const retired = await asUser('PUT', `/v1/admin/routes/${routeId}/status`, admin, {
+      status: 'RETIRED',
+    });
+    expect(retired.status, JSON.stringify(retired.body)).toBe(200);
+    expect(typeof retired.body['retiredAt']).toBe('string');
+
+    // Planlı sefer iptal olur.
+    const afterRetire = await asUser('GET', `/v1/trips?date=${serviceDate}`, admin);
+    const row = requireItems(afterRetire.body).find((item) => item['id'] === tripId);
+    expect(row?.['state']).toBe('CANCELLED');
+
+    // Yeni gün üretilmez.
+    const laterDate = exceptionDate(49);
+    expect(
+      (
+        await asUser('POST', '/v1/admin/trips/generate', admin, {
+          fromDate: laterDate,
+          days: 1,
+        })
+      ).status,
+    ).toBe(200);
+    const laterList = await asUser('GET', `/v1/trips?date=${laterDate}`, admin);
+    expect(requireItems(laterList.body).some((item) => item['routeId'] === routeId)).toBe(false);
+
+    // Emekli güzergâha yeni sürüm yayınlanamaz.
+    const cloned = await asUser('POST', `/v1/admin/routes/${routeId}/versions`, admin, {});
+    expect(cloned.status, JSON.stringify(cloned.body)).toBe(200);
+    const blocked = await asUser(
+      'POST',
+      `/v1/admin/route-versions/${requireString(cloned.body, 'id')}/publish`,
+      admin,
+    );
+    expectError(blocked, 409, 'route_retired');
+
+    // Geri açılınca yeniden üretir.
+    const restored = await asUser('PUT', `/v1/admin/routes/${routeId}/status`, admin, {
+      status: 'ACTIVE',
+    });
+    expect(restored.status, JSON.stringify(restored.body)).toBe(200);
+    expect(restored.body['retiredAt']).toBeNull();
+    expect(
+      (
+        await asUser('POST', '/v1/admin/trips/generate', admin, {
+          fromDate: laterDate,
+          days: 1,
+        })
+      ).status,
+    ).toBe(200);
+    const backList = await asUser('GET', `/v1/trips?date=${laterDate}`, admin);
+    expect(requireItems(backList.body).some((item) => item['routeId'] === routeId)).toBe(true);
+  });
+
+  it('aynı gün teslim talebi iptal edilip yeniden oluşturulabilir', async () => {
+    // Bildirim yinelemesi dedupe kısıtıyla yutulur. Kısıt adı şemayla
+    // eşleşmediği sürece yutulamıyor, işlem patlıyor ve veli "Bu kayıt zaten
+    // var" hatası alıyordu.
+    const serviceDate = exceptionDate(50);
+    const parent = await ayseParent();
+    const payload = {
+      studentId: world.studentId,
+      serviceDate,
+      lat: 40.972,
+      lng: 29.076,
+      addressText: 'Erenköy Mah. iptal sonrası yeni talep',
+      receiverName: 'Mehmet Demir',
+      receiverPhone: '+905321110091',
+    };
+    const first = await asUser('POST', '/v1/parent/delivery-overrides', parent, payload);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    const firstId = requireString(first.body, 'id');
+
+    const cancelled = await asUser(
+      'POST',
+      `/v1/parent/delivery-overrides/${firstId}/cancel`,
+      parent,
+    );
+    expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
+
+    const second = await asUser('POST', '/v1/parent/delivery-overrides', parent, {
+      ...payload,
+      receiverName: 'Ayla Demir',
+      receiverPhone: '+905321110092',
+    });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(second.body['receiverName']).toBe('Ayla Demir');
+    expect(second.body['otpSentTo']).toBe('***0092');
+    expect(requireString(second.body, 'id')).not.toBe(firstId);
+
+    // Yeni kod yalnız yeni alıcıya gider.
+    const sms = await drainSms();
+    expect(otpSentTo(sms, '+905321110092')).toMatch(/^\d{6}$/);
+    expect(codesSentTo(sms, GUNES.guardian.phone)).toEqual([]);
+  });
+
+  it('gövdesiz POST, content-type JSON ile gönderilse de kabul edilir', async () => {
+    // Admin paneli her isteğe `content-type: application/json` koyar ve gövdesiz
+    // uçlara (rota yayınla, davet SMS) boş gövde gönderir. Fastify varsayılanı
+    // bunu FST_ERR_CTP_EMPTY_JSON_BODY ile 400'e düşürüyordu: panelden rota
+    // yayınlanamıyor, davet SMS'i atılamıyordu.
+    const admin = await selinAdmin();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/admin/trips/generate',
+      headers: {
+        'x-client': 'admin',
+        authorization: `Bearer ${admin.token}`,
+        'x-tenant-id': admin.tenantId,
+        'x-app-version': '1.4.2',
+        'content-type': 'application/json',
+      },
+      payload: '',
+    });
+    expect(response.statusCode, response.body).toBe(200);
+  });
+
+  it('yönetici onayı başka günün teslim talebini tüketemez', async () => {
+    // Eskiden yalnız öğrenci eşleşmesine bakılıyordu. Yarın için girilmiş bir
+    // talep, bugünkü teslimi onaylarken tüketiliyor ve kodu siliniyordu; yarın
+    // çocuk kapıda hiç kod sorulmadan teslim ediliyordu.
+    const admin = await selinAdmin();
+    const parent = await ayseParent();
+    const today = exceptionDate(52);
+    const tomorrow = exceptionDate(53);
+
+    const todayOverride = await asUser('POST', '/v1/parent/delivery-overrides', parent, {
+      studentId: world.studentId,
+      serviceDate: today,
+      lat: 40.972,
+      lng: 29.076,
+      addressText: 'Erenköy Mah. bugünkü teslim',
+      receiverName: 'Mehmet Demir',
+      receiverPhone: '+905321110093',
+    });
+    expect(todayOverride.status, JSON.stringify(todayOverride.body)).toBe(200);
+
+    const tomorrowOverride = await asUser('POST', '/v1/parent/delivery-overrides', parent, {
+      studentId: world.studentId,
+      serviceDate: tomorrow,
+      lat: 40.972,
+      lng: 29.076,
+      addressText: 'Erenköy Mah. yarınki teslim',
+      receiverName: 'Ayla Demir',
+      receiverPhone: '+905321110094',
+    });
+    expect(tomorrowOverride.status, JSON.stringify(tomorrowOverride.body)).toBe(200);
+    const tomorrowId = requireString(tomorrowOverride.body, 'id');
+
+    const { afternoonId } = await generateDay(today);
+    const hasan = await hasanCrew();
+    const detail = await asUser('GET', `/v1/trips/${afternoonId}`, hasan);
+    const efe = studentRow(detail.body['students'], world.studentId);
+    expect(efe['deliveryTarget']).toBe('TEMP');
+
+    // Yarının talebiyle bugünkü teslimi onaylama denemesi reddedilir.
+    const wrongDay = await asUser(
+      'POST',
+      `/v1/admin/delivery-overrides/${tomorrowId}/admin-verify`,
+      admin,
+      { tripStudentId: requireString(efe, 'id'), reason: 'Yanlış günün talebi' },
+    );
+    expectError(wrongDay, 409, 'override_date_mismatch');
+
+    // Yarının kodu hâlâ yerinde: kayıt tüketilmemiş.
+    const [row] = await postgres.sql<{ status: string; has_code: boolean }[]>`
+      select status::text as status, (otp_ciphertext is not null) as has_code
+      from delivery_override where id = ${tomorrowId}::uuid
+    `;
+    expect(row?.status).toBe('ACTIVE');
+    expect(row?.has_code).toBe(true);
+  });
+  it('gönderim sırasında iptal edilen bildirim SENT diye diriltilmez', async () => {
+    /**
+     * Outbox üç evrelidir ve gönderim transaction'ın DIŞINDA olur. Şoförün geri
+     * alması tam o aralığa düşerse satır CANCELLED olur; settle şartsız
+     * `status='SENT'` yazarsa iptali ezer ve geri alma akışının kaydını
+     * yalanlar (SPEC §6, 75 saniyelik bekletmenin sebebi).
+     *
+     * Yarışı sağlayıcı geri çağrısının içinde kuruyoruz: orası, gerçekte geri
+     * almanın düştüğü pencerenin ta kendisidir.
+     */
+    const tenantId = world.gunes.tenantId;
+    const dedupe = `race:${randomUUID()}`;
+    const [inserted] = await postgres.sql<{ id: string }[]>`
+      insert into notification (tenant_id, recipient_membership_id, channel, type, dedupe_key)
+      values (
+        ${tenantId}::uuid,
+        ${world.guardianMembershipId}::uuid,
+        'SMS'::notification_channel,
+        'STUDENT_BOARDED',
+        ${dedupe}
+      )
+      returning id
+    `;
+    const notificationId = requireString(inserted ?? {}, 'id');
+
+    let cancelledDuringSend = false;
+    await runOutboxJob(workerSql, {
+      encryptionKey: env.OTP_ENCRYPTION_KEY,
+      push: {
+        send: () => Promise.resolve({ ok: false as const, retry: false, reason: 'no-push' }),
+      },
+      sms: {
+        send: async () => {
+          if (!cancelledDuringSend) {
+            cancelledDuringSend = true;
+            await postgres.sql`
+              update notification set status = 'CANCELLED'
+              where id = ${notificationId}::uuid and claimed_at is null
+            `;
+          }
+          return { ok: true as const };
+        },
+      },
+    });
+
+    const [row] = await postgres.sql<{ status: string; claimed_at: Date | null }[]>`
+      select status::text as status, claimed_at from notification
+      where id = ${notificationId}::uuid
+    `;
+    // Claim edilmiş satır iptal edilemez (geri alma onu "gitmiş" sayar) ve
+    // settle onu normal biçimde SENT yapar.
+    expect(row?.status).toBe('SENT');
+
+    // Henüz üstlenilmemiş satır iptal edilebilir ve settle onu diriltemez.
+    const secondDedupe = `race2:${randomUUID()}`;
+    const [second] = await postgres.sql<{ id: string }[]>`
+      insert into notification (tenant_id, recipient_membership_id, channel, type, dedupe_key, status)
+      values (
+        ${tenantId}::uuid,
+        ${world.guardianMembershipId}::uuid,
+        'SMS'::notification_channel,
+        'STUDENT_BOARDED',
+        ${secondDedupe},
+        'CANCELLED'::notification_status
+      )
+      returning id
+    `;
+    const cancelledId = requireString(second ?? {}, 'id');
+    await runOutboxJob(workerSql, {
+      encryptionKey: env.OTP_ENCRYPTION_KEY,
+      push: {
+        send: () => Promise.resolve({ ok: false as const, retry: false, reason: 'no-push' }),
+      },
+      sms: { send: () => Promise.resolve({ ok: true as const }) },
+    });
+    const [stillCancelled] = await postgres.sql<{ status: string }[]>`
+      select status::text as status from notification where id = ${cancelledId}::uuid
+    `;
+    expect(stillCancelled?.status).toBe('CANCELLED');
+  });
+  it('dev_login_enabled kapalıyken geliştirme girişi çalışmaz', async () => {
+    /**
+     * Fonksiyonlar üretim şemasında durur ama ÖLÜDÜR (0041): bayrak kapalıyken
+     * `null` dönerler. Bayrağı `servisapp_api` açamaz — kill switch'lerle aynı
+     * yerde yaşar ve yalnız migration bağlantısıyla yazılır.
+     */
+    await postgres.sql`update platform_settings set dev_login_enabled = false where id = true`;
+    try {
+      const crew = await request(
+        'POST',
+        '/v1/dev/login',
+        {},
+        { email: GUNES.driver.email, password: 'e2e-dev-login-parola1' },
+      );
+      expectError(crew, 401, 'unauthorized');
+
+      const parent = await request(
+        'POST',
+        '/v1/dev/parent-login',
+        {},
+        { phone: GUNES.guardian.phone, password: 'e2e-dev-login-parola1' },
+      );
+      expectError(parent, 401, 'unauthorized');
+    } finally {
+      await postgres.sql`update platform_settings set dev_login_enabled = true where id = true`;
+    }
+
+    // Bayrak geri açılınca yol yeniden çalışır: kapı geçici, kalıcı hasar yok.
+    const again = await request(
+      'POST',
+      '/v1/dev/parent-login',
+      {},
+      { phone: GUNES.guardian.phone, password: 'e2e-dev-login-parola1' },
+    );
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
   });
 });

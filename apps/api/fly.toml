@@ -11,6 +11,11 @@ primary_region = "fra"   # Supabase EU bölgesine komşu
   NODE_ENV = "production"
   PORT = "3000"
   LOG_LEVEL = "info"
+  # Fly Proxy bu başlığı her istekte kendisi yazar ve istemciden geleni ezer.
+  # Olmadan `request.ip` herkes için vekilin adresi olur: IP başına kurulmuş
+  # sınırlar küresele döner ve tek bir bozuk istemci sahadaki herkesi 429'a
+  # kilitleyebilir. Uygulama portu yalnız vekil üzerinden erişilebilir.
+  CLIENT_IP_HEADER = "fly-client-ip"
 
 [processes]
   app = "node dist/server.js"

@@ -5,10 +5,10 @@ kontrol listesidir; gönderimi yapmaz.
 
 ## Uygulamalar
 
-| Uygulama | Bundle / paket | EAS |
-| -------- | -------------- | --- |
-| Veli | `app.servisapp.parent` | `apps/parent/eas.json` |
-| Personel | `app.servisapp.crew` | `apps/crew/eas.json` |
+| Uygulama | Bundle / paket         | EAS                    |
+| -------- | ---------------------- | ---------------------- |
+| Veli     | `app.servisapp.parent` | `apps/parent/eas.json` |
+| Personel | `app.servisapp.crew`   | `apps/crew/eas.json`   |
 
 Sürüm `0.0.0` iken mağazaya çıkılmaz. `min_supported_app_version` ile kilitlenen
 sürüm, mağazadaki zorunlu güncelleme metniyle aynı semver olmalıdır.
@@ -17,9 +17,29 @@ sürüm, mağazadaki zorunlu güncelleme metniyle aynı semver olmalıdır.
 
 1. `eas init` her uygulama dizininde (projectId buraya yazılır, git'e secret
    sokulmaz).
-2. `eas build --profile production --platform ios`
-3. `eas build --profile production --platform android`
-4. `eas submit` — veya Transporter / Play Console.
+2. **Ortam değişkenlerini EAS'a tanımla** — aşağıdaki tablo. Profiller
+   `eas.json` içinde `"environment"` ile EAS ortamına bağlıdır; değerler EAS
+   panelinde (ya da `eas env:create`) tutulur, repoya girmez.
+3. `eas build --profile production --platform ios`
+4. `eas build --profile production --platform android`
+5. `eas submit` — veya Transporter / Play Console.
+
+### Derlemeye gömülen değişkenler (production)
+
+| Değişken                        | Neden zorunlu                          |
+| ------------------------------- | -------------------------------------- |
+| `EXPO_PUBLIC_API_URL`           | API adresi                             |
+| `EXPO_PUBLIC_SUPABASE_URL`      | Auth (veli telefon OTP)                |
+| `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Auth publishable anahtar               |
+| `EXPO_PUBLIC_EAS_PROJECT_ID`    | Push token kaydı (boşsa kayıt atlanır) |
+
+`EXPO_PUBLIC_DEV_LOGIN` **üretimde tanımlanmaz**.
+
+> Bunlar derleme zamanında paketin içine gömülür; sonradan ayarlanamaz. Eksik
+> `EXPO_PUBLIC_API_URL` ile derlenen bir yayın sürümü eskiden sessizce
+> `127.0.0.1`'e bakıyor ve kullanıcıya yalnız "internet yok" diyordu. Artık
+> ilk istekte `api_unconfigured` hatası verir — yine de gönderim öncesi
+> **preview profiliyle derleyip gerçek cihazda giriş yapın.**
 
 ## Apple
 

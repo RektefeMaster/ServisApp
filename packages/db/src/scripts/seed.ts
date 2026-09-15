@@ -7,6 +7,33 @@ import postgres from 'postgres';
 const url = process.env['MIGRATION_DATABASE_URL'];
 if (!url) throw new Error('MIGRATION_DATABASE_URL tanımlı değil');
 
+/**
+ * Tohum, kill switch'lerle AYNI değişkeni kullanır.
+ *
+ * `MIGRATION_DATABASE_URL`'i üretime çevirmek zorunlu bir operasyon adımıdır
+ * (`pnpm db:platform -- --kill-gps=true` başka türlü çalışmaz). O sırada
+ * yanlışlıkla çalıştırılan bir `pnpm db:seed`, üretime demo kiracı, sahte
+ * öğrenci ve sahte veli yazardı. Uzak bir host artık açık onay ister.
+ */
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0', 'host.docker.internal']);
+
+function assertSeedTargetAllowed(target: string): void {
+  if (process.argv.includes('--allow-remote')) return;
+  let host: string;
+  try {
+    host = new URL(target).hostname;
+  } catch {
+    throw new Error('MIGRATION_DATABASE_URL çözümlenemedi');
+  }
+  if (LOCAL_HOSTS.has(host)) return;
+  throw new Error(
+    `Tohum yalnız yerel veritabanına yazılır; hedef "${host}". ` +
+      'Gerçekten istiyorsanız: pnpm db:seed -- --allow-remote',
+  );
+}
+
+assertSeedTargetAllowed(url);
+
 const TENANT = '00000000-0000-4000-8000-000000000001';
 
 const sql = postgres(url, { max: 1 });
@@ -75,8 +102,8 @@ try {
         values (${student}, ${TENANT}, ${school}, 'Demo Öğrenci', 'GUARDIAN_REQUIRED', '2026-09-01')
       `;
       await tx`
-        insert into route (id, tenant_id, vehicle_id, school_id, segment, shift_no)
-        values (${route}, ${TENANT}, ${vehicle}, ${school}, 'MORNING', 1)
+        insert into route (id, tenant_id, vehicle_id, school_id, segment, shift_no, departure_local_time)
+        values (${route}, ${TENANT}, ${vehicle}, ${school}, 'MORNING', 1, '07:00')
       `;
       await tx`
         insert into route_version (id, tenant_id, route_id, version_no, status, effective_from)

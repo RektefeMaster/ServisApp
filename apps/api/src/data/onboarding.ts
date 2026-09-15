@@ -20,10 +20,14 @@ import {
   withTenant,
   type Database,
 } from '@servisapp/db';
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { conflict, HttpError, notFound } from '../http-error.js';
 import { encryptDeliveryOtp, decryptDeliveryOtp } from '../crypto/delivery-otp.js';
-import { attachMembership, findIdentityByPhone, identityBelongsToTenant, resolveGuardianIdentity } from './identity-write.js';
+import {
+  attachMembership,
+  findIdentityByPhone,
+  resolveGuardianIdentity,
+} from './identity-write.js';
 import { hashInviteToken, inviteExpiresAt, newInviteToken, phoneHint } from './invite-token.js';
 import { loadParentChildren } from './plan-query.js';
 import type {
@@ -64,10 +68,7 @@ function asImportRow(raw: unknown): ImportRowInput | null {
   return parsed.success ? parsed.data : null;
 }
 
-function shouldCommitRow(
-  status: ImportRowView['status'],
-  input: CommitImportInput,
-): boolean {
+function shouldCommitRow(status: ImportRowView['status'], input: CommitImportInput): boolean {
   switch (status) {
     case 'COMMITTED':
     case 'NEEDS_FIX':
@@ -134,45 +135,62 @@ export function createOnboarding(db: Database, options: OnboardingOptions) {
           batchId = created.id;
         }
 
-        for (const row of input.rows) {
-          const classified = await classifyRow(tx, tenantId, row);
-          const [present] = await tx
-            .select({
-              id: importBatchRow.id,
-              status: importBatchRow.status,
-            })
-            .from(importBatchRow)
-            .where(
-              and(
-                eq(importBatchRow.tenantId, tenantId),
-                eq(importBatchRow.batchId, batchId),
-                eq(importBatchRow.rowNo, row.rowNo),
-              ),
-            );
-          if (present?.status === 'COMMITTED') continue;
-          if (present) {
-            await tx
-              .update(importBatchRow)
-              .set({
-                raw: row,
-                status: classified.status,
-                errorCode: classified.errorCode,
-                existingIdentityId: classified.existingIdentityId,
-                existingFullName: classified.existingFullName,
-              })
-              .where(and(eq(importBatchRow.id, present.id), eq(importBatchRow.tenantId, tenantId)));
-          } else {
-            await tx.insert(importBatchRow).values({
-              tenantId,
-              batchId,
-              rowNo: row.rowNo,
+        /**
+         * Dosyanın tamamı önce TOPLU okunur, sınıflandırma bellekte yapılır ve
+         * tek bir upsert ile yazılır. Eski hâl satır başına ~5 ardışık ifade
+         * çalıştırıyordu (bkz. 0040): 500 satırlık tavanda ~2500 gidiş-dönüş,
+         * panel proxy'sinin 20 saniyelik sınırının arkasında.
+         */
+        const lookup = await loadImportLookup(tx, tenantId, batchId, input.rows);
+        const values = input.rows
+          // COMMITTED satır yeniden sınıflandırılmaz; upsert'te de korunur.
+          .filter((row) => !lookup.committedRowNos.has(row.rowNo))
+          .map((row) => {
+            const classified = classifyRow(lookup, tenantId, row);
+            // `jsonb_to_recordset` anahtarları kolon adlarıyla BİREBİR eşler:
+            // camelCase gönderilirse kolon sessizce null gelir.
+            return {
+              row_no: row.rowNo,
               raw: row,
               status: classified.status,
-              errorCode: classified.errorCode,
-              existingIdentityId: classified.existingIdentityId,
-              existingFullName: classified.existingFullName,
-            });
-          }
+              error_code: classified.errorCode,
+              existing_identity_id: classified.existingIdentityId,
+              existing_full_name: classified.existingFullName,
+            };
+          });
+
+        if (values.length > 0) {
+          await tx.execute(sql`
+            insert into import_batch_row (
+              tenant_id, batch_id, row_no, raw, status, error_code,
+              existing_identity_id, existing_full_name
+            )
+            select
+              ${tenantId}::uuid,
+              ${batchId}::uuid,
+              src.row_no,
+              src.raw,
+              src.status::import_row_status,
+              src.error_code,
+              src.existing_identity_id,
+              src.existing_full_name
+            from jsonb_to_recordset(${JSON.stringify(values)}::jsonb) as src(
+              row_no integer,
+              raw jsonb,
+              status text,
+              error_code text,
+              existing_identity_id uuid,
+              existing_full_name text
+            )
+            on conflict (tenant_id, batch_id, row_no) do update
+            set
+              raw = excluded.raw,
+              status = excluded.status,
+              error_code = excluded.error_code,
+              existing_identity_id = excluded.existing_identity_id,
+              existing_full_name = excluded.existing_full_name
+            where import_batch_row.status <> 'COMMITTED'
+          `);
         }
         const id = batchId;
         if (!id) throw new HttpError(500, 'insert_failed', 'İçe aktarma açılamadı');
@@ -411,7 +429,10 @@ export function createOnboarding(db: Database, options: OnboardingOptions) {
           .from(identity)
           .innerJoin(
             tenantMembership,
-            and(eq(tenantMembership.identityId, identity.id), eq(tenantMembership.tenantId, tenantId)),
+            and(
+              eq(tenantMembership.identityId, identity.id),
+              eq(tenantMembership.tenantId, tenantId),
+            ),
           )
           .where(eq(identity.id, identityId));
         if (!row) throw notFound('Kişi bulunamadı');
@@ -451,20 +472,105 @@ export function createOnboarding(db: Database, options: OnboardingOptions) {
   };
 }
 
-async function classifyRow(
+interface ImportLookup {
+  /** Numaraya sahip kimlikler — kiracılar ötesi; karar çağırana ait. */
+  identityByPhone: Map<string, { id: string; fullName: string }>;
+  /** Bu kiracıda üyeliği olan kimlik id'leri. */
+  identitiesInTenant: Set<string>;
+  /** Bu kiracıya ait okul id'leri. */
+  ownedSchoolIds: Set<string>;
+  /** Zaten işlenmiş satırlar — yeniden sınıflandırılmaz. */
+  committedRowNos: Set<number>;
+}
+
+/**
+ * Dosyanın ihtiyaç duyduğu her şeyi dört sorguda toplar: telefonlar, o
+ * kimliklerin kiracı üyeliği, okullar ve batch'in mevcut satır durumları.
+ */
+async function loadImportLookup(
   tx: Database,
   tenantId: string,
+  batchId: string | null,
+  rows: readonly ImportRowInput[],
+): Promise<ImportLookup> {
+  const phones = [...new Set(rows.map((row) => row.guardianPhone))];
+  const schoolIds = [...new Set(rows.map((row) => row.schoolId))];
+
+  const identityByPhone = new Map<string, { id: string; fullName: string }>();
+  if (phones.length > 0) {
+    const result: unknown = await tx.execute(
+      sql`select find_identities_by_phones(${sql.param(phones)}::text[]) as found`,
+    );
+    const found = firstRow(result)?.['found'];
+    if (Array.isArray(found)) {
+      for (const entry of found) {
+        const record = jsonObject(entry);
+        if (!record) continue;
+        const id = record['id'];
+        const fullName = record['fullName'];
+        const phone = record['phone'];
+        if (typeof id !== 'string' || typeof fullName !== 'string' || typeof phone !== 'string') {
+          continue;
+        }
+        identityByPhone.set(phone, { id, fullName });
+      }
+    }
+  }
+
+  const identityIds = [...new Set([...identityByPhone.values()].map((item) => item.id))];
+  const identitiesInTenant = new Set<string>();
+  if (identityIds.length > 0) {
+    const memberships = await tx
+      .select({ identityId: tenantMembership.identityId })
+      .from(tenantMembership)
+      .where(
+        and(
+          eq(tenantMembership.tenantId, tenantId),
+          inArray(tenantMembership.identityId, identityIds),
+        ),
+      );
+    for (const row of memberships) identitiesInTenant.add(row.identityId);
+  }
+
+  const ownedSchoolIds = new Set<string>();
+  if (schoolIds.length > 0) {
+    const schools = await tx
+      .select({ id: school.id })
+      .from(school)
+      .where(and(eq(school.tenantId, tenantId), inArray(school.id, schoolIds)));
+    for (const row of schools) ownedSchoolIds.add(row.id);
+  }
+
+  // Commit yolu tek satırı kendi kilidiyle okur; batch taramasına ihtiyaç yok.
+  const existing = batchId
+    ? await tx
+        .select({ rowNo: importBatchRow.rowNo, status: importBatchRow.status })
+        .from(importBatchRow)
+        .where(and(eq(importBatchRow.tenantId, tenantId), eq(importBatchRow.batchId, batchId)))
+    : [];
+  const committedRowNos = new Set(
+    existing.filter((row) => row.status === 'COMMITTED').map((row) => row.rowNo),
+  );
+
+  return { identityByPhone, identitiesInTenant, ownedSchoolIds, committedRowNos };
+}
+
+/**
+ * Saf sınıflandırma: karar kuralları eskisiyle birebir aynı, yalnız veriyi
+ * artık tek tek sorgu yerine önceden toplanmış tablodan okur.
+ */
+function classifyRow(
+  lookup: ImportLookup,
+  _tenantId: string,
   row: ImportRowInput,
-): Promise<{
+): {
   status: ImportRowView['status'];
   errorCode: string | null;
   existingIdentityId: string | null;
   existingFullName: string | null;
-}> {
-  const existing = await findIdentityByPhone(tx, row.guardianPhone);
-  const sameTenant = existing
-    ? await identityBelongsToTenant(tx, tenantId, existing.id)
-    : false;
+} {
+  const existing = lookup.identityByPhone.get(row.guardianPhone) ?? null;
+  const sameTenant = existing ? lookup.identitiesInTenant.has(existing.id) : false;
   const visibleId = existing && sameTenant ? existing.id : null;
   const visibleName = existing && sameTenant ? existing.fullName : null;
   if (existing) {
@@ -480,11 +586,7 @@ async function classifyRow(
       };
     }
   }
-  const [owned] = await tx
-    .select({ id: school.id })
-    .from(school)
-    .where(and(eq(school.id, row.schoolId), eq(school.tenantId, tenantId)));
-  if (!owned) {
+  if (!lookup.ownedSchoolIds.has(row.schoolId)) {
     return {
       status: 'NEEDS_FIX',
       errorCode: 'school_not_found',
@@ -498,6 +600,20 @@ async function classifyRow(
     existingIdentityId: visibleId,
     existingFullName: visibleName,
   };
+}
+
+/**
+ * Tek satır için taze sınıflandırma. `commitOneRow` kendi transaction'ında
+ * çalışır ve önizlemeden bu yana veri değişmiş olabilir; karar bu yüzden
+ * commit anında yeniden verilir. Kural gövdesi önizlemeyle aynı.
+ */
+async function classifyOneRow(
+  tx: Database,
+  tenantId: string,
+  row: ImportRowInput,
+): Promise<ReturnType<typeof classifyRow>> {
+  const lookup = await loadImportLookup(tx, tenantId, null, [row]);
+  return classifyRow(lookup, tenantId, row);
 }
 
 async function commitOneRow(
@@ -532,7 +648,7 @@ async function commitOneRow(
       .where(eq(importBatchRow.id, row.id));
     return;
   }
-  const classified = await classifyRow(tx, tenantId, parsed);
+  const classified = await classifyOneRow(tx, tenantId, parsed);
   if (classified.status === 'NEEDS_FIX') {
     await tx
       .update(importBatchRow)
@@ -831,12 +947,7 @@ async function lookupInvite(
   const found = jsonObject(row?.['found']);
   if (!found) return null;
   const status = found['status'];
-  if (
-    status !== 'PENDING' &&
-    status !== 'USED' &&
-    status !== 'EXPIRED' &&
-    status !== 'REVOKED'
-  ) {
+  if (status !== 'PENDING' && status !== 'USED' && status !== 'EXPIRED' && status !== 'REVOKED') {
     return null;
   }
   return {

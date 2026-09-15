@@ -122,9 +122,4 @@ export const importRowStatusEnum = pgEnum('import_row_status', [
   'COMMITTED',
   'FAILED',
 ]);
-export const inviteStatusEnum = pgEnum('invite_status', [
-  'PENDING',
-  'USED',
-  'EXPIRED',
-  'REVOKED',
-]);
+export const inviteStatusEnum = pgEnum('invite_status', ['PENDING', 'USED', 'EXPIRED', 'REVOKED']);

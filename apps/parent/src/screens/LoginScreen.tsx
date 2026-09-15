@@ -1,14 +1,15 @@
 import { useState } from 'react';
+import { StyleSheet } from 'react-native';
 import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-} from 'react-native';
-import { colors, space } from '@servisapp/ui';
+  AuthIntro,
+  Surface,
+  Button,
+  Field,
+  IconButton,
+  InlineAlert,
+  Screen,
+  space,
+} from '@servisapp/ui';
 import { ApiError } from '../api/client';
 import {
   authClientAvailable,
@@ -19,159 +20,215 @@ import {
 } from '../auth';
 import type { ParentSession } from '../api/client';
 
-export function LoginScreen({ onLoggedIn }: { onLoggedIn: (session: ParentSession) => void }) {
+export function LoginScreen({
+  onLoggedIn,
+  onOpenInvite,
+}: {
+  onLoggedIn: (session: ParentSession) => void;
+  onOpenInvite: () => void;
+}) {
   const otpReady = authClientAvailable();
   const showDevPassword = devPasswordLoginEnabled() || (!otpReady && __DEV__);
   const [phone, setPhone] = useState('+90');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [step, setStep] = useState<'phone' | 'code'>('phone');
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<'idle' | 'otp' | 'password'>('idle');
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Kimliği henüz bağlanmamış veli.
+   *
+   * Sunucu doğru davranır: veli üyeliği yalnız davet aktivasyonuyla açılır
+   * (SPEC onboarding). Ama ekranda bu, çıkışı olmayan kırmızı bir kutuydu —
+   * "Bu hesap henüz tanımlanmamış" deyip susuyordu. Çözümü olan tek işlem
+   * kartın altında, sayfayı kaydırınca görünen soluk bir bağlantıydı.
+   */
+  const [needsInvite, setNeedsInvite] = useState(false);
+
+  function failFrom(caught: unknown, fallback: string): void {
+    const notProvisioned =
+      caught instanceof ApiError &&
+      (caught.code === 'identity_not_provisioned' || caught.status === 403);
+    setNeedsInvite(notProvisioned);
+    if (notProvisioned) {
+      setError('Numaran kayıtlı ama hesabın henüz açılmadı. Davetini onaylaman gerekiyor.');
+      return;
+    }
+    setError(caught instanceof ApiError ? caught.message : fallback);
+  }
 
   async function sendCode() {
-    setBusy(true);
+    setBusy('otp');
     setError(null);
+    setNeedsInvite(false);
     try {
       const e164 = await requestPhoneOtp(phone);
       setPhone(e164);
       setStep('code');
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'Kod gönderilemedi');
+      failFrom(caught, 'Kod gönderilemedi');
     } finally {
-      setBusy(false);
+      setBusy('idle');
     }
   }
 
   async function verifyCode() {
-    setBusy(true);
+    setBusy('otp');
     setError(null);
+    setNeedsInvite(false);
     try {
       onLoggedIn(await verifyPhoneOtp(phone, code));
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'Giriş başarısız');
+      failFrom(caught, 'Giriş başarısız');
     } finally {
-      setBusy(false);
+      setBusy('idle');
     }
   }
 
   async function submitDevPassword() {
-    setBusy(true);
+    setBusy('password');
     setError(null);
+    setNeedsInvite(false);
     try {
       onLoggedIn(await loginWithPassword(phone.trim(), password));
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.message : 'Giriş başarısız');
+      failFrom(caught, 'Giriş başarısız');
     } finally {
-      setBusy(false);
+      setBusy('idle');
     }
   }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.screen}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <Text style={styles.eyebrow}>VELİ</Text>
-      <Text style={styles.title}>Çocuğunun servisi</Text>
-      <Text style={styles.lede}>
-        {otpReady
-          ? 'Telefonuna gelen SMS kodu ile giriş. Canlı konum yalnız senin durağını gösterir.'
-          : 'Yerel geliştirici girişi. Üretimde telefon SMS kodu kullanılır.'}
-      </Text>
-      <TextInput
-        autoCapitalize="none"
-        autoCorrect={false}
-        editable={step === 'phone'}
-        keyboardType="phone-pad"
-        placeholder="+90532…"
-        placeholderTextColor={colors.muted}
-        style={styles.input}
-        value={phone}
-        onChangeText={setPhone}
+    <Screen scroll keyboard>
+      <AuthIntro
+        audience="Aile"
+        title={'Her yolculukta,\nyanında.'}
+        body="Servis yolculuğunu takip et, günlük planını kolayca yönet."
       />
-      {otpReady && step === 'code' ? (
-        <TextInput
-          keyboardType="number-pad"
-          placeholder="6 haneli kod"
-          placeholderTextColor={colors.muted}
-          style={styles.input}
-          value={code}
-          onChangeText={setCode}
+      <Surface>
+        <Field
+          label="Telefon numaran"
+          autoComplete="tel"
+          helper="Servise kayıtlı telefon numaranı kullan."
+          autoCapitalize="none"
+          autoCorrect={false}
+          editable={step === 'phone'}
+          keyboardType="phone-pad"
+          placeholder="+90532…"
+          value={phone}
+          onChangeText={setPhone}
         />
-      ) : null}
-      {showDevPassword ? (
-        <TextInput
-          secureTextEntry
-          placeholder="Geliştirici parolası"
-          placeholderTextColor={colors.muted}
-          style={styles.input}
-          value={password}
-          onChangeText={setPassword}
-        />
-      ) : null}
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-      {otpReady && step === 'phone' ? (
-        <Pressable disabled={busy || phone.length < 8} onPress={() => void sendCode()} style={styles.cta}>
-          {busy ? <ActivityIndicator color={colors.asphalt} /> : <Text style={styles.ctaText}>Kod gönder</Text>}
-        </Pressable>
-      ) : null}
-      {otpReady && step === 'code' ? (
-        <Pressable disabled={busy || code.length < 6} onPress={() => void verifyCode()} style={styles.cta}>
-          {busy ? <ActivityIndicator color={colors.asphalt} /> : <Text style={styles.ctaText}>Giriş</Text>}
-        </Pressable>
-      ) : null}
-      {showDevPassword ? (
-        <Pressable
-          disabled={busy || phone.length < 8 || password.length < 16}
-          onPress={() => void submitDevPassword()}
-          style={otpReady ? styles.secondary : styles.cta}
-        >
-          {busy && !otpReady ? (
-            <ActivityIndicator color={colors.asphalt} />
-          ) : (
-            <Text style={otpReady ? styles.secondaryText : styles.ctaText}>
-              {otpReady ? 'Yerel parola ile gir' : 'Giriş'}
-            </Text>
-          )}
-        </Pressable>
-      ) : null}
-      {!otpReady && !showDevPassword ? (
-        <Text style={styles.error}>Giriş yapılandırması eksik. Supabase Auth veya yerel parola gerekir.</Text>
-      ) : null}
-    </KeyboardAvoidingView>
+
+        {otpReady && step === 'code' ? (
+          <Field
+            label="Doğrulama kodu"
+            autoComplete="sms-otp"
+            textContentType="oneTimeCode"
+            maxLength={6}
+            autoFocus
+            keyboardType="number-pad"
+            placeholder="6 haneli kod"
+            value={code}
+            onChangeText={(value) => setCode(value.replace(/\D/g, ''))}
+          />
+        ) : null}
+
+        {showDevPassword ? (
+          <Field
+            label="Geliştirici parolası"
+            secureTextEntry
+            placeholder="En az 16 karakter"
+            value={password}
+            onChangeText={setPassword}
+          />
+        ) : null}
+
+        {error ? (
+          <InlineAlert
+            title={error}
+            tone={needsInvite ? 'warn' : 'danger'}
+            body={
+              needsInvite
+                ? 'SMS ile gelen davet bağlantısını aç; telefon doğrulamasından sonra çocukların burada görünür.'
+                : undefined
+            }
+          />
+        ) : null}
+        {needsInvite ? (
+          <Button label="Davetimi aç" onPress={onOpenInvite} style={styles.dev} />
+        ) : null}
+
+        {otpReady && step === 'phone' ? (
+          <Button
+            label="Doğrulama kodu al"
+            disabled={phone.length < 8}
+            loading={busy === 'otp'}
+            onPress={() => void sendCode()}
+          />
+        ) : null}
+
+        {otpReady && step === 'code' ? (
+          <Button
+            label="Güvenle giriş yap"
+            disabled={code.length < 6}
+            loading={busy === 'otp'}
+            onPress={() => void verifyCode()}
+          />
+        ) : null}
+
+        {showDevPassword ? (
+          <Button
+            label={otpReady ? 'Yerel parola ile gir' : 'Giriş'}
+            variant={otpReady ? 'secondary' : 'primary'}
+            disabled={phone.length < 8 || password.length < 16}
+            loading={busy === 'password'}
+            onPress={() => void submitDevPassword()}
+            style={styles.dev}
+          />
+        ) : null}
+
+        {!otpReady && !showDevPassword ? (
+          <InlineAlert
+            title="Giriş yapılandırması eksik"
+            body="Supabase Auth veya yerel parola gerekir."
+            tone="danger"
+          />
+        ) : null}
+
+        {otpReady && step === 'code' ? (
+          <IconButton
+            label="Telefon numarasını değiştir"
+            disabled={busy !== 'idle'}
+            onPress={() => {
+              setStep('phone');
+              setCode('');
+              setError(null);
+            }}
+          />
+        ) : null}
+      </Surface>
+      <IconButton
+        label="İlk kez mi geldin? Davetini aç"
+        onPress={onOpenInvite}
+        style={styles.invite}
+      />
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.asphalt, padding: space.lg, justifyContent: 'center' },
-  eyebrow: { color: colors.headlamp, letterSpacing: 3, fontWeight: '800', marginBottom: space.sm },
-  title: { color: colors.paper, fontSize: 32, fontWeight: '800' },
-  lede: { color: colors.muted, marginTop: space.sm, marginBottom: space.lg, fontSize: 16 },
-  input: {
-    backgroundColor: colors.steel,
-    color: colors.paper,
-    borderRadius: 12,
-    padding: space.md,
-    marginBottom: space.sm,
-    fontSize: 16,
+  title: {
+    marginTop: space.xs,
   },
-  error: { color: colors.danger, marginBottom: space.sm },
-  cta: {
-    backgroundColor: colors.headlamp,
-    borderRadius: 16,
-    minHeight: 56,
-    alignItems: 'center',
-    justifyContent: 'center',
+  lede: {
+    marginTop: space.sm,
+    marginBottom: space.lg,
+  },
+  dev: {
     marginTop: space.sm,
   },
-  ctaText: { color: colors.asphalt, fontSize: 18, fontWeight: '800' },
-  secondary: {
-    borderRadius: 16,
-    minHeight: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: space.sm,
+  invite: {
+    alignSelf: 'center',
+    marginTop: space.md,
   },
-  secondaryText: { color: colors.muted, fontWeight: '700' },
 });

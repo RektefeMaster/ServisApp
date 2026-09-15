@@ -15,11 +15,15 @@ describe('planStopArrivals', () => {
   });
 
   it('kaçırılan durağı MISSED işaretleyip sonraki ARRIVED olabilir', () => {
-    const marks = planStopArrivals(stops, { lat: 41.0, lng: 29.04 }, {
-      arrivalRadiusM: 75,
-      missAdvanceM: 200,
-      missLeaveM: 500,
-    });
+    const marks = planStopArrivals(
+      stops,
+      { lat: 41.0, lng: 29.04 },
+      {
+        arrivalRadiusM: 75,
+        missAdvanceM: 200,
+        missLeaveM: 500,
+      },
+    );
     expect(marks[0]).toEqual({ stopId: 's1', kind: 'MISSED' });
     expect(marks.some((mark) => mark.stopId === 's2' && mark.kind === 'ARRIVED')).toBe(true);
   });

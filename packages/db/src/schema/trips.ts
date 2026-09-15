@@ -14,6 +14,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import {
@@ -122,6 +123,8 @@ export const tripStop = pgTable(
   (t) => [
     unique('trip_stop_seq').on(t.tenantId, t.tripId, t.seq),
     tenantRowUnique('trip_stop', t.tenantId, t.id),
+    /** Öğrencinin durağı kendi seferinin durağı olsun diye bileşik FK hedefi. */
+    unique('trip_stop_trip_row_unique').on(t.tenantId, t.tripId, t.id),
     foreignKey({
       name: 'trip_stop_trip_fk',
       columns: [t.tenantId, t.tripId],
@@ -269,7 +272,7 @@ export const tripVehicleAssignment = pgTable(
       foreignColumns: [vehicle.tenantId, vehicle.id],
     }),
     tenantIsolation('trip_vehicle_assignment'),
-    index('trip_vehicle_assignment_open_idx')
+    uniqueIndex('trip_vehicle_assignment_open_idx')
       .on(t.tenantId, t.tripId)
       .where(sql`${t.validTo} is null`),
   ],
@@ -301,7 +304,7 @@ export const tripCrewAssignment = pgTable(
       foreignColumns: [tenantMembership.tenantId, tenantMembership.id],
     }),
     tenantIsolation('trip_crew_assignment'),
-    index('trip_crew_assignment_open_idx')
+    uniqueIndex('trip_crew_assignment_open_idx')
       .on(t.tenantId, t.tripId, t.role)
       .where(sql`${t.validTo} is null`),
   ],

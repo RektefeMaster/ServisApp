@@ -92,19 +92,49 @@ describe('JWT doğrulama', () => {
     expect(claims.phone).toBe('+905321234567');
   });
 
-  it('doğrulanmamış telefon ile kimlik bağlanmaz', async () => {
+  /**
+   * Supabase'in GERÇEKTEN ürettiği jeton: üst seviyede `phone_verified` yok,
+   * doğrulama bayrağı yalnız user_metadata'da. Bunu reddetmek üretimde her
+   * girişi kırıyordu (bkz. jwt.ts `phoneVerified`).
+   */
+  it('gerçek Supabase jetonunda telefon üst seviye bayrak olmadan da okunur', async () => {
+    const token = await sign({
+      role: 'authenticated',
+      aal: 'aal1',
+      amr: [{ method: 'otp', timestamp: 1_700_000_000 }],
+      app_metadata: { provider: 'phone', providers: ['phone'] },
+      email: '',
+      phone: '905321234567',
+      session_id: '00000000-0000-4000-8000-0000000000ff',
+      is_anonymous: false,
+      user_metadata: { phone_verified: true, email_verified: false },
+    });
+    const claims = await verifyAccessToken(token, hsInput());
+    expect(claims.phone).toBe('+905321234567');
+    expect(claims.email).toBeNull();
+  });
+
+  it('telefonu boş olan jetonda telefon iddiası yoktur', async () => {
+    const token = await sign({ role: 'authenticated', phone: '', email: 'ayse@example.com' });
+    const claims = await verifyAccessToken(token, hsInput());
+    expect(claims.phone).toBeNull();
+  });
+
+  it('üst seviye phone_verified false ise telefon reddedilir', async () => {
     const token = await sign({
       role: 'authenticated',
       phone: '+905321234567',
+      phone_verified: false,
     });
     const claims = await verifyAccessToken(token, hsInput());
     expect(claims.phone).toBeNull();
   });
 
-  it('user_metadata içindeki phone_verified iddiayı bağlama için yetmez', async () => {
+  it('user_metadata, üst seviyede reddedilmiş telefonu kurtaramaz', async () => {
     const token = await sign({
       role: 'authenticated',
       phone: '+905321234567',
+      phone_verified: false,
       user_metadata: { phone_verified: true },
     });
     const claims = await verifyAccessToken(token, hsInput());

@@ -29,6 +29,7 @@ interface PlatformPatch {
   killOtp?: boolean;
   killRealtime?: boolean;
   minSupportedAppVersion?: string;
+  devLoginEnabled?: boolean;
 }
 
 function parsePlatformArgs(argv: string[]): PlatformPatch {
@@ -39,6 +40,7 @@ function parsePlatformArgs(argv: string[]): PlatformPatch {
       'kill-otp': { type: 'string' },
       'kill-realtime': { type: 'string' },
       'min-app-version': { type: 'string' },
+      'dev-login': { type: 'string' },
     },
     strict: true,
     allowPositionals: false,
@@ -52,12 +54,14 @@ function parsePlatformArgs(argv: string[]): PlatformPatch {
     killOtp: parseFlag(values['kill-otp'], '--kill-otp'),
     killRealtime: parseFlag(values['kill-realtime'], '--kill-realtime'),
     minSupportedAppVersion: min,
+    devLoginEnabled: parseFlag(values['dev-login'], '--dev-login'),
   };
   if (
     patch.killGps === undefined &&
     patch.killOtp === undefined &&
     patch.killRealtime === undefined &&
-    patch.minSupportedAppVersion === undefined
+    patch.minSupportedAppVersion === undefined &&
+    patch.devLoginEnabled === undefined
   ) {
     throw new Error('en az bir bayrak verin');
   }
@@ -74,6 +78,7 @@ async function main(): Promise<void> {
         kill_otp: boolean;
         kill_realtime: boolean;
         min_supported_app_version: string;
+        dev_login_enabled: boolean;
       }[]
     >`
       update platform_settings
@@ -85,13 +90,14 @@ async function main(): Promise<void> {
           ${patch.minSupportedAppVersion ?? null}::text,
           min_supported_app_version
         ),
+        dev_login_enabled = coalesce(${patch.devLoginEnabled ?? null}::boolean, dev_login_enabled),
         updated_at = now()
       where id = true
-      returning kill_gps, kill_otp, kill_realtime, min_supported_app_version
+      returning kill_gps, kill_otp, kill_realtime, min_supported_app_version, dev_login_enabled
     `;
     if (!row) throw new Error('platform_settings satırı yok');
     console.log(
-      `kill_gps=${String(row.kill_gps)} kill_otp=${String(row.kill_otp)} kill_realtime=${String(row.kill_realtime)} min_app=${row.min_supported_app_version}`,
+      `kill_gps=${String(row.kill_gps)} kill_otp=${String(row.kill_otp)} kill_realtime=${String(row.kill_realtime)} min_app=${row.min_supported_app_version} dev_login=${String(row.dev_login_enabled)}`,
     );
   } finally {
     await sql.end();

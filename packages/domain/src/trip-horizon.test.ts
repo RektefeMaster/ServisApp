@@ -7,6 +7,8 @@ import {
   expectedStopKind,
   horizonDatesFrom,
   horizonServiceDates,
+  defaultDepartureLocalTime,
+  normalizeDepartureLocalTime,
   plannedDepartureAt,
   ymdInTimeZone,
 } from './trip-horizon.js';
@@ -34,6 +36,27 @@ describe('sefer ufku', () => {
     expect(plannedDepartureAt('2026-09-10', 'AFTERNOON', 'Europe/Istanbul').toISOString()).toBe(
       '2026-09-10T13:00:00.000Z',
     );
+  });
+
+  it('rota kendi kalkış saatini taşır', () => {
+    expect(
+      plannedDepartureAt('2026-09-10', 'MORNING', 'Europe/Istanbul', '06:35').toISOString(),
+    ).toBe('2026-09-10T03:35:00.000Z');
+    expect(
+      plannedDepartureAt('2026-09-10', 'AFTERNOON', 'Europe/Istanbul', '17:45').toISOString(),
+    ).toBe('2026-09-10T14:45:00.000Z');
+  });
+
+  it('boş veya bozuk kalkış saatinde segment varsayılanına düşer', () => {
+    expect(defaultDepartureLocalTime('MORNING')).toBe('07:00');
+    expect(defaultDepartureLocalTime('AFTERNOON')).toBe('16:00');
+    expect(normalizeDepartureLocalTime('06:35:00', 'MORNING')).toBe('06:35');
+    expect(normalizeDepartureLocalTime('', 'MORNING')).toBe('07:00');
+    expect(normalizeDepartureLocalTime('25:00', 'AFTERNOON')).toBe('16:00');
+    expect(normalizeDepartureLocalTime(null, 'AFTERNOON')).toBe('16:00');
+    expect(
+      plannedDepartureAt('2026-09-10', 'MORNING', 'Europe/Istanbul', 'abc').toISOString(),
+    ).toBe('2026-09-10T04:00:00.000Z');
   });
 
   it('verilen takvim gününü saat dilimine yeniden çevirmeden sayar', () => {

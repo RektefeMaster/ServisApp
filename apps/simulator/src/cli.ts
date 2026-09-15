@@ -14,6 +14,7 @@ export const SCENARIO_IDS = [
   'unordered-replay',
   'last-minute-cancel',
   'temp-delivery',
+  'handover-guard',
   'otp-lock',
   'mid-trip-swap',
   'tunnel-sync',
@@ -118,6 +119,7 @@ export function scenarioGroup(id: ScenarioId): 'ops' | 'gps' | 'load' | 'all' {
     case 'unordered-replay':
     case 'last-minute-cancel':
     case 'temp-delivery':
+    case 'handover-guard':
     case 'otp-lock':
     case 'mid-trip-swap':
       return 'ops';

@@ -39,9 +39,7 @@ describe('OTP kilit / yeniden gönderim', () => {
 
 describe('kritik uyarı düşümü', () => {
   it('aktif seferde durak varıldıysa düşer', () => {
-    expect(
-      criticalAlertAutoDropped({ tripState: 'ACTIVE', stopArrivedAt: new Date() }),
-    ).toBe(true);
+    expect(criticalAlertAutoDropped({ tripState: 'ACTIVE', stopArrivedAt: new Date() })).toBe(true);
     expect(criticalAlertAutoDropped({ tripState: 'ACTIVE', stopArrivedAt: null })).toBe(false);
   });
 

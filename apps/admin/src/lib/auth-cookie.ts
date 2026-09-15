@@ -1,6 +1,7 @@
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const ADMIN_APP_VERSION = '99.0.0';
+/** Derleme zamanında package.json'dan gömülür; sürüm kapısı panelde de işler. */
+export const ADMIN_APP_VERSION = process.env.NEXT_PUBLIC_ADMIN_VERSION ?? '1.0.0';
 
 export const ADMIN_TOKEN_COOKIE =
   process.env.NODE_ENV === 'production' ? '__Host-servisapp.admin' : 'servisapp.admin';

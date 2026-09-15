@@ -186,23 +186,13 @@ export function registerTripRoutes(app: FastifyInstance, data: AppData): void {
   app.post('/v1/trips/:tripId/incidents', async (request) => {
     const params = parse(tripIdParams, request.params);
     const input = parse(reportIncidentInput, request.body);
-    return data.trips.reportIncident(
-      tenantIdOf(request),
-      actorOf(request),
-      params.tripId,
-      input,
-    );
+    return data.trips.reportIncident(tenantIdOf(request), actorOf(request), params.tripId, input);
   });
 
   app.post('/v1/trips/:tripId/location', async (request) => {
     const params = parse(tripIdParams, request.params);
     const input = parse(locationPingInput, request.body);
-    return data.trips.ingestLocation(
-      tenantIdOf(request),
-      actorOf(request),
-      params.tripId,
-      input,
-    );
+    return data.trips.ingestLocation(tenantIdOf(request), actorOf(request), params.tripId, input);
   });
 
   app.post('/v1/trips/:tripId/otp/verify', async (request) => {

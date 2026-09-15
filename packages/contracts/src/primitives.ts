@@ -1,6 +1,10 @@
 import { z } from 'zod';
 
-/** Tüm kimlikler UUIDv7 — sıralı ama tahmin edilemez, numaralandırmaya kapalı. */
+/**
+ * Tüm kimlikler `gen_random_uuid()` ile üretilen UUIDv4'tür: sıra bilgisi
+ * taşımaz, tahmin edilemez, numaralandırmaya kapalı. Kimliğin bilinmesi yetki
+ * vermez — her uç ayrıca kiracı ve rol kontrolünden geçer.
+ */
 export const uuid = z.uuid();
 
 /** Türkiye cep telefonu, E.164: +905XXXXXXXXX */

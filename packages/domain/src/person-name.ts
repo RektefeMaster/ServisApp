@@ -1,11 +1,7 @@
 /** Telefon eşleşmesinde isim karşılaştırması — merge kararı değil, sinyal. */
 
 export function normalizePersonName(value: string): string {
-  return value
-    .normalize('NFKC')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .toLocaleLowerCase('tr-TR');
+  return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('tr-TR');
 }
 
 export function namesLikelySame(left: string, right: string): boolean {

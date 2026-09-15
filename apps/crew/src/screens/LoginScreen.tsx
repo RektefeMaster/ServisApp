@@ -1,22 +1,9 @@
 import { useState } from 'react';
-import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { StyleSheet } from 'react-native';
 import { exhaustive } from '@servisapp/domain';
-import { colors, space } from '@servisapp/ui';
+import { AuthIntro, Surface, Button, Field, InlineAlert, Screen, space } from '@servisapp/ui';
 import { ApiError } from '../api/client';
-import {
-  finishMembershipChoice,
-  loginWithPassword,
-  type CrewMembershipChoice,
-} from '../auth';
+import { finishMembershipChoice, loginWithPassword, type CrewMembershipChoice } from '../auth';
 import type { CrewSession } from '../api/client';
 
 export function LoginScreen({ onLoggedIn }: { onLoggedIn: (session: CrewSession) => void }) {
@@ -74,108 +61,81 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (session: CrewSession)
 
   if (choice) {
     return (
-      <View style={styles.screen}>
-        <Text style={styles.eyebrow}>ŞİRKET</Text>
-        <Text style={styles.title}>Hangisinde çalışıyorsun?</Text>
-        <Text style={styles.lede}>Aynı telefon birden fazla servis şirketinde olabilir.</Text>
+      <Screen scroll keyboard contentStyle={styles.content}>
+        <AuthIntro
+          audience="Ekip"
+          title="Şirketini seç."
+          body="Bugün çalışacağın servis şirketiyle devam et."
+        />
         {choice.memberships.map((item) => (
-          <Pressable
+          <Button
             key={item.membershipId}
+            label={item.tenantName}
             disabled={busy}
             onPress={() => void choose(item)}
-            style={styles.button}
-          >
-            <Text style={styles.buttonText}>{item.tenantName}</Text>
-          </Pressable>
+            style={styles.choice}
+          />
         ))}
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-      </View>
+        {error ? <InlineAlert title={error} tone="danger" /> : null}
+      </Screen>
     );
   }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.screen}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <Text style={styles.eyebrow}>PERSONEL</Text>
-      <Text style={styles.title}>ServisApp</Text>
-      <Text style={styles.lede}>Şoför ve hostes sefer ekranı. Veli hesabı buradan girmez.</Text>
-      <TextInput
-        autoCapitalize="none"
-        autoComplete="email"
-        keyboardType="email-address"
-        placeholder="E-posta"
-        placeholderTextColor={colors.muted}
-        style={styles.input}
-        value={email}
-        onChangeText={setEmail}
+    <Screen scroll keyboard contentStyle={styles.content}>
+      <AuthIntro
+        audience="Ekip"
+        title={'Güzel bir gün.\nGüvenli bir yolculuk.'}
+        body="Seferlerin, durakların ve öğrencilerin. Günün akışı burada."
       />
-      <TextInput
-        autoComplete="password"
-        placeholder="Parola"
-        placeholderTextColor={colors.muted}
-        secureTextEntry
-        style={styles.input}
-        value={password}
-        onChangeText={setPassword}
-      />
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-      <Pressable disabled={busy} onPress={() => void submit()} style={styles.button}>
-        {busy ? <ActivityIndicator color={colors.asphalt} /> : <Text style={styles.buttonText}>Giriş</Text>}
-      </Pressable>
-    </KeyboardAvoidingView>
+      <Surface>
+        <Field
+          label="E-posta"
+          autoCapitalize="none"
+          autoComplete="email"
+          autoCorrect={false}
+          keyboardType="email-address"
+          placeholder="ornek@servis.com"
+          value={email}
+          onChangeText={setEmail}
+        />
+        <Field
+          label="Parola"
+          autoComplete="password"
+          placeholder="Parola"
+          secureTextEntry
+          value={password}
+          onChangeText={setPassword}
+          returnKeyType="go"
+          onSubmitEditing={() => {
+            if (!busy && email.trim() && password) void submit();
+          }}
+        />
+        {error ? <InlineAlert title={error} tone="danger" /> : null}
+        <Button
+          label="Giriş yap"
+          onPress={() => void submit()}
+          loading={busy}
+          disabled={!email.trim() || !password}
+        />
+      </Surface>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: colors.asphalt,
-    padding: space.lg,
-    justifyContent: 'center',
-  },
-  eyebrow: {
-    color: colors.headlamp,
-    letterSpacing: 4,
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: space.sm,
+  content: {
+    justifyContent: 'flex-start',
+    paddingBottom: space.xxxl,
   },
   title: {
-    color: colors.paper,
-    fontSize: 36,
-    fontWeight: '800',
-    marginBottom: space.sm,
+    marginTop: space.sm,
   },
   lede: {
-    color: colors.muted,
-    fontSize: 16,
+    marginTop: space.xs,
     marginBottom: space.lg,
   },
-  input: {
-    backgroundColor: colors.steel,
-    color: colors.paper,
-    borderRadius: 12,
-    padding: space.md,
-    fontSize: 18,
+  choice: {
     marginBottom: space.sm,
-  },
-  error: {
-    color: colors.danger,
-    marginBottom: space.sm,
-  },
-  button: {
-    backgroundColor: colors.headlamp,
-    borderRadius: 14,
-    minHeight: 56,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: space.md,
-  },
-  buttonText: {
-    color: colors.asphalt,
-    fontSize: 18,
-    fontWeight: '800',
   },
 });

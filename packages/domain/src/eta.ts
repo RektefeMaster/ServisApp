@@ -3,6 +3,8 @@ import { haversineMeters, type LatLng } from './haversine.js';
 import { URBAN_BUS_SPEED_MPS, type BaselineLeg } from './route-baseline.js';
 
 export const DEFAULT_APPROACH_MINUTES = 5;
+/** 12 saat: bundan uzun bir ETA veri hatasıdır, ekranda gösterilmez. */
+export const MAX_ETA_SECONDS = 12 * 60 * 60;
 export const ETA_DISPLAY_LOW_CONFIDENCE = 0.4;
 
 export interface ObservedLeg {
@@ -28,10 +30,7 @@ export function blendSegmentSeconds(
     return Math.max(1, Math.round(baselineSec));
   }
   const historyWeight = Math.min(0.65, sampleCount / 40);
-  return Math.max(
-    1,
-    Math.round(baselineSec * (1 - historyWeight) + medianSeconds * historyWeight),
-  );
+  return Math.max(1, Math.round(baselineSec * (1 - historyWeight) + medianSeconds * historyWeight));
 }
 
 export function delayFactor(
@@ -59,14 +58,26 @@ export function remainingEtaSeconds(input: {
   targetStopId: string;
   legs: readonly BaselineLeg[];
   observed: readonly ObservedLeg[];
+  /** Varışı doğrulanmış son durağın sırası; rota ilerleyişi buradan geri saramaz. */
+  lastArrivedSeq?: number | null;
 }): number {
   const ordered = [...input.stops].sort((a, b) => a.seq - b.seq);
   const target = ordered.find((stop) => stop.id === input.targetStopId);
   if (!target) {
-    return Math.max(1, Math.round(haversineMeters(input.vehicle, ordered[0] ?? input.vehicle) / URBAN_BUS_SPEED_MPS));
+    return finiteSeconds(
+      haversineMeters(input.vehicle, ordered[0] ?? input.vehicle) / URBAN_BUS_SPEED_MPS,
+    );
   }
+  // Geometrik en yakın durak tek başına yeterli değil: yol kıvrıldığında araç,
+  // çoktan geçtiği bir durağa yeniden yaklaşabilir ve ETA geri sarabilirdi.
+  // Varışı kaydedilmiş duraklar zemin oluşturur.
   const nearest = nearestStop(input.vehicle, ordered);
-  const startSeq = nearest && nearest.seq <= target.seq ? nearest.seq : target.seq;
+  let startSeq = nearest && nearest.seq <= target.seq ? nearest.seq : target.seq;
+  const arrived = input.lastArrivedSeq;
+  if (arrived !== undefined && arrived !== null && startSeq <= arrived) {
+    const next = ordered.find((stop) => stop.seq > arrived);
+    startSeq = Math.min(next ? next.seq : target.seq, target.seq);
+  }
   const factor = delayFactor(input.legs, input.observed);
   const first = ordered.find((stop) => stop.seq >= startSeq) ?? target;
   let total = haversineMeters(input.vehicle, first) / URBAN_BUS_SPEED_MPS;
@@ -89,7 +100,19 @@ export function remainingEtaSeconds(input: {
     total += haversineMeters(cursor, next) / URBAN_BUS_SPEED_MPS;
     cursor = next;
   }
-  return Math.max(1, Math.round(total * factor));
+  return finiteSeconds(total * factor);
+}
+
+/**
+ * ETA saniyesi her zaman sonlu bir pozitif tam sayıdır.
+ *
+ * Tek bir NaN (bozuk koordinat, sıfır hız, eksik bacak) `eta_seconds::integer`
+ * yazımında patlar; bu da o araçtan gelen HER GPS ping'inin 500 dönmesi
+ * demektir. Hesap bozulursa ETA'yı kaybetmek, canlı takibi kaybetmekten iyidir.
+ */
+function finiteSeconds(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(MAX_ETA_SECONDS, Math.max(1, Math.round(value)));
 }
 
 function nearestStop(point: LatLng, stops: readonly EtaStop[]): EtaStop | null {
@@ -125,10 +148,26 @@ export function etaConfidence(input: {
 
 export type ParentEtaPhrase = 'Yaklaşıyor' | `Yaklaşık ${number} dk` | `${number}-${number} dk`;
 
+/**
+ * Sayı olarak gösterilebilir bir ETA mı?
+ *
+ * `finiteSeconds` ufkun dışındaki her değeri MAX_ETA_SECONDS'a KIRPAR; kırpma
+ * hesabı kurtarmak için vardır, sonucu doğrulamak için değil. Kırpılmış değer
+ * ekrana gidince veli "Yaklaşık 720 dk" görüyordu: araç rotanın 800 km dışında
+ * bir koordinat bildirdiğinde (yanlış cihaz konumu, eski oturum) çıkan tam
+ * olarak budur ve güven puanı 0.75 ile "yüksek" görünür. On iki saatlik bir
+ * servis tahmini bilgi değil, gürültüdür.
+ */
+export function etaWithinHorizon(etaSeconds: number): boolean {
+  return Number.isFinite(etaSeconds) && etaSeconds > 0 && etaSeconds < MAX_ETA_SECONDS;
+}
+
+/** Ufuk dışındaysa metin YOKTUR: uydurma bir süre yerine hiçbir şey. */
 export function formatParentEta(input: {
   etaSeconds: number;
   confidence: number;
-}): ParentEtaPhrase {
+}): ParentEtaPhrase | null {
+  if (!etaWithinHorizon(input.etaSeconds)) return null;
   if (input.confidence < ETA_DISPLAY_LOW_CONFIDENCE) return 'Yaklaşıyor';
   const minutes = Math.max(1, Math.round(input.etaSeconds / 60));
   if (minutes <= 2) return 'Yaklaşıyor';
@@ -140,6 +179,13 @@ export function formatParentEta(input: {
   return `Yaklaşık ${minutes} dk`;
 }
 
+/**
+ * Eşiği AŞAĞI doğru geçtiğimiz ping'te bildirilir. Eski koşul "önceki ETA da
+ * eşiğin altındaydı" diyordu; bu tam da geçişin yaşandığı ping'i atlayıp
+ * bildirimi bir tur geciktiriyordu. İlk ölçüm zaten eşiğin altındaysa (veli
+ * ekranı geç açtı, sefer yakında başladı) beklenmez — `approachNotifiedAt`
+ * zaten tekrarı engelliyor.
+ */
 export function shouldNotifyApproach(input: {
   etaSeconds: number;
   previousEtaSeconds: number | null;
@@ -149,12 +195,8 @@ export function shouldNotifyApproach(input: {
   if (input.approachNotifiedAt) return false;
   const threshold = (input.thresholdMinutes ?? DEFAULT_APPROACH_MINUTES) * 60;
   if (input.etaSeconds > threshold) return false;
-  if (input.previousEtaSeconds === null) return false;
-  return input.previousEtaSeconds <= threshold;
-}
-
-export function parentEtaVisible(confidence: number): boolean {
-  return confidence >= 0;
+  if (input.previousEtaSeconds === null) return true;
+  return input.previousEtaSeconds > threshold;
 }
 
 export function approachThresholdSeconds(minutes = DEFAULT_APPROACH_MINUTES): number {

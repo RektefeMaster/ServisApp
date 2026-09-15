@@ -1,6 +1,7 @@
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import { envString } from './env';
 import { registerPushToken } from './api/client';
 import type { ParentSession } from './api/client';
 import { loadDeviceId } from './auth';
@@ -25,19 +26,15 @@ export async function registerParentPush(session: ParentSession): Promise<PushRe
   }
   try {
     const current = await Notifications.getPermissionsAsync();
-    const asked = current.granted
-      ? current
-      : await Notifications.requestPermissionsAsync();
+    const asked = current.granted ? current : await Notifications.requestPermissionsAsync();
     if (!asked.granted) {
       return {
         status: 'denied',
         message: 'Bildirim izni kapalı. Ayarlardan açınca servis yaklaşınca haber gider.',
       };
     }
-    const projectId = process.env['EXPO_PUBLIC_EAS_PROJECT_ID']?.trim();
-    const token = (
-      await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : {})
-    ).data;
+    const projectId = envString('EXPO_PUBLIC_EAS_PROJECT_ID');
+    const token = (await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : {})).data;
     await registerPushToken(session, {
       deviceId: await loadDeviceId(),
       platform: Platform.OS === 'ios' ? 'IOS' : 'ANDROID',

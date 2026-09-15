@@ -30,6 +30,8 @@ import type {
   PreviewImportInput,
   RecordVehicleCheckInput,
   ReplaceRouteStopsInput,
+  UpdateRouteDepartureInput,
+  UpdateRouteLifecycleInput,
   ReportIncidentInput,
   SessionSnapshot,
   StudentCommandInput,
@@ -62,11 +64,12 @@ export interface DevParentIdentity {
 }
 
 export interface SessionPort {
-  resolve(input: {
-    authUserId: string;
-    phone: string | null;
-    email: string | null;
-  }): Promise<SessionSnapshot>;
+  /**
+   * Kimlik YALNIZ doğrulanmış telefonla bağlanır (SPEC §2, migration 0015).
+   * Doğrulanmış bir e-posta tek başına personel üyeliğini ele geçiremez, bu
+   * yüzden e-posta buraya hiç girmez.
+   */
+  resolve(input: { authUserId: string; phone: string | null }): Promise<SessionSnapshot>;
   findDevLoginIdentity(email: string): Promise<DevLoginIdentity | null>;
   findDevParentIdentity(phone: string): Promise<DevParentIdentity | null>;
 }
@@ -101,6 +104,8 @@ export interface RouteSummary {
   schoolId: string;
   segment: 'MORNING' | 'AFTERNOON';
   shiftNo: number;
+  departureLocalTime: string;
+  retiredAt: string | null;
   publishedVersionId: string | null;
   draftVersionId: string | null;
 }
@@ -112,6 +117,8 @@ export interface RouteDetail {
   segment: 'MORNING' | 'AFTERNOON';
   shiftNo: number;
   maxDetourM: number;
+  departureLocalTime: string;
+  retiredAt: string | null;
   versions: Array<{
     id: string;
     versionNo: number;
@@ -131,6 +138,16 @@ export interface RouteAdminPort {
   ): Promise<{ id: string; draftVersionId: string }>;
   listRoutes(tenantId: string): Promise<RouteSummary[]>;
   getRoute(tenantId: string, routeId: string): Promise<RouteDetail | null>;
+  updateRouteDeparture(
+    tenantId: string,
+    routeId: string,
+    input: UpdateRouteDepartureInput,
+  ): Promise<RouteDetail>;
+  updateRouteLifecycle(
+    tenantId: string,
+    routeId: string,
+    input: UpdateRouteLifecycleInput,
+  ): Promise<RouteDetail>;
   getRouteVersion(tenantId: string, versionId: string): Promise<RouteVersionView | null>;
   replaceRouteStops(
     tenantId: string,
@@ -446,6 +463,12 @@ export interface AdminPort extends RouteAdminPort {
     studentId: string,
     membershipId: string,
   ): Promise<{ status: 'REVOKED' }>;
+  /** İptal edilmiş ilişkiyi açıkça geri açar; "veli ekle" bunu yapmaz. */
+  restoreGuardian(
+    tenantId: string,
+    studentId: string,
+    membershipId: string,
+  ): Promise<{ status: 'ACTIVE' }>;
   changeUnactivatedPhone(
     tenantId: string,
     identityId: string,
@@ -498,7 +521,11 @@ export interface AdminPort extends RouteAdminPort {
     input: CreateStudentTripMoveInput,
   ): Promise<StudentTripMoveResult>;
   listEvents(tenantId: string, membershipId: string, date: string): Promise<AdminEventsList>;
-  listPriorities(tenantId: string, membershipId: string, date: string): Promise<AdminPrioritiesList>;
+  listPriorities(
+    tenantId: string,
+    membershipId: string,
+    date: string,
+  ): Promise<AdminPrioritiesList>;
   listExceptions(tenantId: string, membershipId: string): Promise<AdminExceptionsList>;
   approveDeliveryOverride(
     tenantId: string,
@@ -566,7 +593,7 @@ export interface ParentPort {
     tenantId: string,
     membershipId: string,
     overrideId: string,
-  ): Promise<{ id: string; otpCode: string; addressText: string; resendCount: number }>;
+  ): Promise<{ id: string; otpSentTo: string; addressText: string; resendCount: number }>;
   getParentDayPlan(
     tenantId: string,
     membershipId: string,

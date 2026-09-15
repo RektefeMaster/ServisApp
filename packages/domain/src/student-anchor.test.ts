@@ -16,9 +16,9 @@ describe('transfer durak eşleşmesi', () => {
 
   it('akşam ilk PICKUP değil son DROPOFF havuzundan evine yakın olanı seçer', () => {
     const home = { lat: 40.9601, lng: 29.0801 };
-    expect(
-      pickStudentAnchorStop([school, moda, lastDrop], home, 'AFTERNOON', 1500),
-    ).toEqual(lastDrop);
+    expect(pickStudentAnchorStop([school, moda, lastDrop], home, 'AFTERNOON', 1500)).toEqual(
+      lastDrop,
+    );
   });
 
   it('adres yoksa sessizce ilk durağa düşmez; eşik uzak durağı keser', () => {

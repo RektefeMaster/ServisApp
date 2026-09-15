@@ -43,7 +43,13 @@ export async function applyTripStudentPlan(
     receiverName?: string | null;
     dropoff?: { lat: number; lng: number; text: string };
   },
-): Promise<{ applied: boolean; reason: string; state: string; stateSeq: number; tripState: string }> {
+): Promise<{
+  applied: boolean;
+  reason: string;
+  state: string;
+  stateSeq: number;
+  tripState: string;
+}> {
   const row = firstRow(
     await tx.execute(sql`
       select apply_trip_student_plan(
@@ -249,7 +255,12 @@ export async function listPendingAlerts(
   const acks = await tx
     .select({ alertId: criticalChangeAck.alertId })
     .from(criticalChangeAck)
-    .where(and(eq(criticalChangeAck.tenantId, tenantId), eq(criticalChangeAck.membershipId, membershipId)));
+    .where(
+      and(
+        eq(criticalChangeAck.tenantId, tenantId),
+        eq(criticalChangeAck.membershipId, membershipId),
+      ),
+    );
   const acked = new Set(acks.map((row) => row.alertId));
   const isAdmin = roles.includes('ADMIN');
 
@@ -306,15 +317,12 @@ export async function cancelActiveOverrides(
       ),
     );
   if (rows.length === 0) return;
-  await tx
-    .update(deliveryOverride)
-    .set({ status: 'CANCELLED', otpCiphertext: null })
-    .where(
-      inArray(
-        deliveryOverride.id,
-        rows.map((row) => row.id),
-      ),
+  // Kod kolonlarına yalnız definer fonksiyon dokunur (migration 0037).
+  for (const row of rows) {
+    await tx.execute(
+      sql`select clear_delivery_otp(${row.id}::uuid, 'CANCELLED'::delivery_override_status)`,
     );
+  }
   const open = await findOpenTripStudents(tx, tenantId, studentId, serviceDate, 'AFTERNOON');
   for (const item of open) {
     if (item.deliveryTarget !== 'TEMP') continue;

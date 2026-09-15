@@ -13,18 +13,26 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint src"
   },
   "peerDependencies": {
+    "expo-haptics": "*",
     "react": "19.2.3",
     "react-native": "0.86.3"
   },
   "devDependencies": {
     "@types/react": "19.2.2",
+    "expo-haptics": "~15.0.8",
     "react": "19.2.3",
     "react-native": "0.86.3",
     "typescript": "6.0.3"
+  },
+  "dependencies": {
+    "@expo-google-fonts/figtree": "^0.4.1",
+    "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
+    "expo-font": "^57.0.4",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "15.15.4"
   }
 }

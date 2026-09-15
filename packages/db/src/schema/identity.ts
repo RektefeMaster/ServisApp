@@ -148,6 +148,12 @@ export const device = pgTable(
     appVersion: text('app_version'),
     lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    /**
+     * Cihazı kimin kapattığı: üyelik durumu mu, yönetici kararı mı. Üyelik
+     * yeniden ACTIVE olduğunda yalnız ilkini geri açarız; yöneticinin bilerek
+     * iptal ettiği telefon kapalı kalır.
+     */
+    revokedReason: text('revoked_reason'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

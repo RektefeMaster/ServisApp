@@ -71,6 +71,8 @@ export {
   expectedStopKind,
   horizonDatesFrom,
   horizonServiceDates,
+  defaultDepartureLocalTime,
+  normalizeDepartureLocalTime,
   plannedDepartureAt,
   ymdInTimeZone,
   zonedDayEnd,
@@ -78,13 +80,16 @@ export {
   type HorizonSegment,
 } from './trip-horizon.js';
 export {
+  completionBlockers,
   crewActionsForStudent,
   pendingStudentsAtStop,
   resumeOpenTrip,
+  stopWorkload,
   tripFocus,
   tripGate,
   type CrewSegment,
   type CrewStop,
+  type CompletionBlocker,
   type CrewStudent,
   type CrewTripView,
   type TripFocus,
@@ -130,11 +135,7 @@ export {
   type StopArrivalKind,
   type StopArrivalMark,
 } from './stop-progress.js';
-export {
-  hasUsableCoordinates,
-  tripReadyCrewBlock,
-  type TripReadyBlock,
-} from './publish-ready.js';
+export { hasUsableCoordinates, tripReadyCrewBlock, type TripReadyBlock } from './publish-ready.js';
 export {
   applyOptimistic,
   applyServerResult,
@@ -196,11 +197,13 @@ export {
 } from './route-baseline.js';
 export {
   DEFAULT_APPROACH_MINUTES,
+  MAX_ETA_SECONDS,
   SEGMENT_STAT_MIN_SAMPLES,
   blendSegmentSeconds,
   delayFactor,
   describeEtaConfidence,
   etaConfidence,
+  etaWithinHorizon,
   formatParentEta,
   remainingEtaSeconds,
   shouldNotifyApproach,
@@ -227,3 +230,21 @@ export {
   tripBroadcastOpen,
   type SharedVehicleBroadcast,
 } from './tracking-access.js';
+export { parseInviteToken } from './invite-link.js';
+export {
+  SEGMENT_SAMPLE_WINDOW,
+  appendSegmentSample,
+  localTimeBucket,
+  quantile,
+  summarizeSegmentSamples,
+  type SegmentStatSummary,
+} from './segment-stats.js';
+export {
+  VEHICLE_DOCUMENT_WARNING_DAYS,
+  vehicleComplianceBlock,
+  vehicleComplianceMessage,
+  vehicleComplianceWarnings,
+  type VehicleComplianceBlock,
+  type VehicleComplianceWarning,
+  type VehicleDocuments,
+} from './vehicle-compliance.js';

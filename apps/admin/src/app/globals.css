@@ -4,6 +4,13 @@
   --color-paper: #eef1ec;
   --color-ink: #1b2a4a;
   --color-rule: #c9d0c6;
+  /*
+   * Form alanı kenarı. Alan dolgusu da kart zemini de beyaz; alanın nerede
+   * başladığını yalnız kenarlık söylüyor. `rule` beyaz üstünde 1.58:1 ile
+   * WCAG 1.4.11'in istediği 3:1'in çok altındaydı — kutular neredeyse
+   * görünmüyordu. Ayraçlar sessiz tonunu korur, form kontrolleri bunu kullanır.
+   */
+  --color-field: #7c8878;
   --color-stripe: #d4a017;
   --color-muted: #5c675e;
 }

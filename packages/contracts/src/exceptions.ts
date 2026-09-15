@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { studentPlanStatus } from './onboarding.js';
 import { coordinate, phoneE164, serviceDate, uuid } from './primitives.js';
 import { tripSegment } from './route.js';
 
@@ -81,12 +82,16 @@ export const deliveryOverrideView = z.object({
   addressText: z.string(),
   detourM: z.number(),
   maxDetourM: z.number(),
-  /** Yalnız veli yanıtında; personel/admin listesinde asla yok. */
-  otpCode: z.string().regex(/^\d{6}$/).nullable(),
+  /**
+   * Kodun kendisi DEĞİL, kimin numarasına gittiği (maskeli). Kod yalnız çocuğu
+   * teslim alacak kişinin telefonuna gider; veli kodu görmez, gönderildiğini
+   * görür. Personel/admin listesinde bu alan da yoktur.
+   */
+  otpSentTo: z.string().nullable(),
 });
 export type DeliveryOverrideView = z.infer<typeof deliveryOverrideView>;
 
-export const adminDeliveryOverrideView = deliveryOverrideView.omit({ otpCode: true });
+export const adminDeliveryOverrideView = deliveryOverrideView.omit({ otpSentTo: true });
 export type AdminDeliveryOverrideView = z.infer<typeof adminDeliveryOverrideView>;
 
 export const addressChangeView = z.object({
@@ -118,6 +123,9 @@ export const adminExceptionsList = z.object({
 export type AdminExceptionsList = z.infer<typeof adminExceptionsList>;
 
 export const parentDayPlan = z.object({
+  /** Segment planı: yalnız akşam servisi varsa sabah NO_SERVICE'tir. */
+  morningPlanStatus: studentPlanStatus,
+  eveningPlanStatus: studentPlanStatus,
   morningAbsent: z.boolean(),
   eveningAbsent: z.boolean(),
   morningExceptionId: uuid.nullable(),

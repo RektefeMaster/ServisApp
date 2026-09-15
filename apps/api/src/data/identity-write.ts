@@ -15,7 +15,9 @@ export async function findIdentityByPhone(
   tx: Database,
   phone: string,
 ): Promise<FoundIdentity | null> {
-  const result: unknown = await tx.execute(sql`select find_identity_by_phone(${phone}::text) as found`);
+  const result: unknown = await tx.execute(
+    sql`select find_identity_by_phone(${phone}::text) as found`,
+  );
   const row = firstRow(result);
   const found = jsonObject(row?.['found']);
   if (!found) return null;

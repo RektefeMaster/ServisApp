@@ -3,12 +3,7 @@ import type * as Location from 'expo-location';
 import type { LocationIngestResult } from '@servisapp/contracts';
 import { ApiError, postLocation, type CrewSession } from './api/client';
 
-const GPS_STOP_CODES = new Set([
-  'trip_not_active',
-  'gps_killed',
-  'device_revoked',
-  'wrong_device',
-]);
+const GPS_STOP_CODES = new Set(['trip_not_active', 'gps_killed', 'device_revoked', 'wrong_device']);
 export const PING_INTERVAL_MS = 8_000;
 const LAST_SENT_KEY = 'crew.gps.lastSentAt';
 const CONTEXT_KEY = 'crew.gps.context';
@@ -65,8 +60,8 @@ export async function sendGpsSample(
       lat: coords.latitude,
       lng: coords.longitude,
       accuracyM: coords.accuracy,
-      speedMps: coords.speed != null && coords.speed >= 0 ? coords.speed : null,
-      heading: coords.heading != null && coords.heading >= 0 ? coords.heading : null,
+      speedMps: typeof coords.speed === 'number' && coords.speed >= 0 ? coords.speed : null,
+      heading: typeof coords.heading === 'number' && coords.heading >= 0 ? coords.heading : null,
       recordedAt: new Date(position.timestamp).toISOString(),
       sessionEpoch,
     });

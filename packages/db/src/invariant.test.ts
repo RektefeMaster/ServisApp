@@ -17,6 +17,30 @@ async function withOtpOk<T>(
   });
 }
 
+/**
+ * OTP kolonlarına artık yalnız SECURITY DEFINER fonksiyonlar yazabilir (0037).
+ * Test kurgusu da aynı kapıdan geçer: rolü kuşanır, kiracı bağlamını kurar.
+ */
+async function seedOtp(
+  sql: postgres.Sql,
+  tenantId: string,
+  overrideId: string,
+  /** hmac ve ciphertext hex metindir ('00'), kaçış belirsizliği olmasın. */
+  values: { hmac: string; ciphertext: string; expiresAt?: string },
+): Promise<void> {
+  await sql.begin(async (tx) => {
+    await tx`select set_config('app.tenant_id', ${tenantId}, true)`;
+    await tx`set local role servisapp_definer`;
+    await tx`
+      update delivery_override
+      set otp_hmac = decode(${values.hmac}, 'hex'),
+          otp_ciphertext = decode(${values.ciphertext}, 'hex'),
+          otp_expires_at = ${values.expiresAt ?? null}::timestamptz
+      where id = ${overrideId}::uuid and tenant_id = ${tenantId}::uuid
+    `;
+  });
+}
+
 let harness: Harness;
 
 beforeAll(async () => {
@@ -141,12 +165,16 @@ describe('TEMP teslimat', () => {
     await harness.sql`
       insert into delivery_override (
         id, tenant_id, student_id, service_date, address_id,
-        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, status
+        receiver_name, receiver_phone, status
       ) values (
         ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
-        'Teyze', '+905321119999', '\\x00'::bytea, '\\x01'::bytea, 'ACTIVE'
+        'Teyze', '+905321119999', 'ACTIVE'
       )
     `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+    });
     await harness.sql`
       update trip_student
       set state = 'ON_BOARD', delivery_target = 'TEMP', state_seq = 1
@@ -219,13 +247,17 @@ describe('TEMP teslimat', () => {
     await harness.sql`
       insert into delivery_override (
         id, tenant_id, student_id, service_date, address_id,
-        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, otp_expires_at, status
+        receiver_name, receiver_phone, status
       ) values (
         ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
-        'Teyze', '+905321119999', '\\x00'::bytea, '\\x01'::bytea,
-        now() - interval '1 minute', 'ACTIVE'
+        'Teyze', '+905321119999', 'ACTIVE'
       )
     `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
     await harness.sql`
       update trip_student
       set state = 'ON_BOARD', delivery_target = 'TEMP', state_seq = 1
@@ -248,13 +280,16 @@ describe('TEMP teslimat', () => {
     await harness.sql`
       insert into delivery_override (
         id, tenant_id, student_id, service_date, address_id,
-        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, locked_until, status
+        receiver_name, receiver_phone, locked_until, status
       ) values (
         ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
-        'Teyze', '+905321119998', '\\x00'::bytea, '\\x01'::bytea,
-        now() + interval '10 minutes', 'ACTIVE'
+        'Teyze', '+905321119998', now() + interval '10 minutes', 'ACTIVE'
       )
     `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+    });
     await harness.sql`
       update trip_student
       set state = 'ON_BOARD', delivery_target = 'TEMP', state_seq = 1
@@ -425,15 +460,16 @@ describe('şema emniyeti', () => {
     expect(roles).toHaveLength(3);
     expect(roles.every((row) => row.rolbypassrls === false)).toBe(true);
 
+    // resolve_session'ın iki aşırı yüklemesi var (0038); distinct ile tekilleşir.
     const owners = await harness.sql<{ proname: string; rolname: string }[]>`
-      select p.proname, r.rolname
+      select distinct p.proname, r.rolname
       from pg_proc p
       join pg_roles r on r.oid = p.proowner
       where p.proname in (
         'complete_trip', 'mark_delivery_verified', 'admin_override_delivery',
         'ensure_identity', 'resolve_session', 'list_tenants_for_jobs',
         'lock_trip_student_for_command', 'apply_student_state_transition',
-        'apply_trip_student_plan',
+        'apply_trip_student_plan', 'issue_delivery_otp', 'clear_delivery_otp',
         'find_dev_login_identity', 'find_dev_parent_identity', 'invalidate_after_check_when_occupied',
         'find_identity_by_phone', 'find_invite_by_token_hash', 'update_trip_student_tracking'
       )
@@ -443,6 +479,7 @@ describe('şema emniyeti', () => {
       { proname: 'admin_override_delivery', rolname: 'servisapp_definer' },
       { proname: 'apply_student_state_transition', rolname: 'servisapp_definer' },
       { proname: 'apply_trip_student_plan', rolname: 'servisapp_definer' },
+      { proname: 'clear_delivery_otp', rolname: 'servisapp_definer' },
       { proname: 'complete_trip', rolname: 'servisapp_definer' },
       { proname: 'ensure_identity', rolname: 'servisapp_definer' },
       { proname: 'find_dev_login_identity', rolname: 'servisapp_definer' },
@@ -450,6 +487,7 @@ describe('şema emniyeti', () => {
       { proname: 'find_identity_by_phone', rolname: 'servisapp_definer' },
       { proname: 'find_invite_by_token_hash', rolname: 'servisapp_definer' },
       { proname: 'invalidate_after_check_when_occupied', rolname: 'servisapp_definer' },
+      { proname: 'issue_delivery_otp', rolname: 'servisapp_definer' },
       { proname: 'list_tenants_for_jobs', rolname: 'servisapp_definer' },
       { proname: 'lock_trip_student_for_command', rolname: 'servisapp_definer' },
       { proname: 'mark_delivery_verified', rolname: 'servisapp_definer' },
@@ -730,12 +768,16 @@ describe('şema emniyeti', () => {
     await harness.sql`
       insert into delivery_override (
         id, tenant_id, student_id, service_date, address_id,
-        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, status
+        receiver_name, receiver_phone, status
       ) values (
         ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
-        'Teyze', '+905321119997', '\\x00'::bytea, '\\x01'::bytea, 'ACTIVE'
+        'Teyze', '+905321119997', 'ACTIVE'
       )
     `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+    });
 
     await expect(
       withOtpOk(
@@ -753,12 +795,16 @@ describe('şema emniyeti', () => {
     await harness.sql`
       insert into delivery_override (
         id, tenant_id, student_id, service_date, address_id,
-        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, status
+        receiver_name, receiver_phone, status
       ) values (
         ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
-        'Teyze', '+905321119996', '\\x00'::bytea, '\\x01'::bytea, 'ACTIVE'
+        'Teyze', '+905321119996', 'ACTIVE'
       )
     `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+    });
     await harness.sql`
       update trip_student
       set state = 'ON_BOARD', delivery_target = 'TEMP', state_seq = 1
@@ -780,12 +826,16 @@ describe('şema emniyeti', () => {
     await harness.sql`
       insert into delivery_override (
         id, tenant_id, student_id, service_date, address_id,
-        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, status
+        receiver_name, receiver_phone, status
       ) values (
         ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
-        'Teyze', '+905321119995', '\\x00'::bytea, '\\x01'::bytea, 'ACTIVE'
+        'Teyze', '+905321119995', 'ACTIVE'
       )
     `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+    });
     await expect(
       harness.sql.begin(async (tx) => {
         await tx`select set_config('app.tenant_id', ${world.tenantA}, true)`;
@@ -1042,20 +1092,168 @@ describe('OTP ve plan koruması', () => {
     await harness.sql`
       insert into delivery_override (
         id, tenant_id, student_id, service_date, address_id,
-        receiver_name, receiver_phone, otp_hmac, otp_ciphertext, status
+        receiver_name, receiver_phone, status
       ) values (
         ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
-        'Teyze', '+905321119997', '\\x00'::bytea, '\\x01'::bytea, 'ACTIVE'
+        'Teyze', '+905321119997', 'ACTIVE'
       )
     `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+    });
     await expect(
       asApi(
         harness.sql,
         world.tenantA,
-        (tx) =>
-          tx`update delivery_override set otp_hmac = '\\x02'::bytea where id = ${overrideId}`,
+        (tx) => tx`update delivery_override set otp_hmac = '\\x02'::bytea where id = ${overrideId}`,
       ),
     ).rejects.toThrow(/otp_columns_are_protected/);
+  });
+
+  /**
+   * 0021'deki tetik yalnız TEK bir UPDATE'te non-null → non-null geçişine
+   * bakıyordu; "önce null'la, sonra yaz" dizisi korumayı tamamen atlıyordu.
+   * Yeni tetik (0037) kolonlara her dokunuşu reddeder.
+   */
+  it('API OTP kodunu iki adımda da değiştiremez', async () => {
+    const world = await insertWorld(harness.sql);
+    const overrideId = randomUUID();
+    await harness.sql`
+      insert into delivery_override (
+        id, tenant_id, student_id, service_date, address_id,
+        receiver_name, receiver_phone, status
+      ) values (
+        ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
+        'Teyze', '+905321119994', 'ACTIVE'
+      )
+    `;
+    await seedOtp(harness.sql, world.tenantA, overrideId, {
+      hmac: '00',
+      ciphertext: '01',
+    });
+    await expect(
+      asApi(harness.sql, world.tenantA, async (tx) => {
+        await tx`
+          update delivery_override set otp_hmac = null, otp_ciphertext = null
+          where id = ${overrideId}
+        `;
+        return tx`
+          update delivery_override set otp_hmac = '\\x02'::bytea, otp_ciphertext = '\\x03'::bytea
+          where id = ${overrideId}
+        `;
+      }),
+    ).rejects.toThrow(/otp_columns_are_protected/);
+
+    const [row] = await harness.sql<{ otp_hmac: Buffer }[]>`
+      select otp_hmac from delivery_override where id = ${overrideId}
+    `;
+    expect(row?.otp_hmac?.toString('hex')).toBe('00');
+  });
+
+  it('API kod kolonu dolu bir talep INSERT edemez', async () => {
+    const world = await insertWorld(harness.sql);
+    await expect(
+      asApi(
+        harness.sql,
+        world.tenantA,
+        (tx) => tx`
+          insert into delivery_override (
+            tenant_id, student_id, service_date, address_id,
+            receiver_name, receiver_phone, otp_hmac, status
+          ) values (
+            ${world.tenantA}, ${world.studentId}, '2026-09-10', ${world.addressId},
+            'Teyze', '+905321119993', '\\x09'::bytea, 'ACTIVE'
+          )
+        `,
+      ),
+    ).rejects.toThrow(/otp_columns_are_protected/);
+  });
+
+  /**
+   * Süresi dolan kod temizlenince hash null'a düşer. Yenilemeyi "hash var mı"
+   * ile anlamaya çalışmak sayacı sıfırlardı; niyet açıkça taşınır.
+   */
+  it('süresi dolmuş kod yenilenince sayaç artar ve talep ACTIVE olur', async () => {
+    const world = await insertWorld(harness.sql);
+    const overrideId = randomUUID();
+    await harness.sql`
+      insert into delivery_override (
+        id, tenant_id, student_id, service_date, address_id,
+        receiver_name, receiver_phone, status
+      ) values (
+        ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
+        'Teyze', '+905321119991', 'ACTIVE'
+      )
+    `;
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    await asApi(
+      harness.sql,
+      world.tenantA,
+      (tx) => tx`
+        select issue_delivery_otp(
+          ${overrideId}::uuid, decode('00', 'hex'), decode('01', 'hex'),
+          ${expiresAt}::timestamptz, false, 5
+        )
+      `,
+    );
+    await asApi(
+      harness.sql,
+      world.tenantA,
+      (tx) => tx`
+        select clear_delivery_otp(${overrideId}::uuid, 'EXPIRED'::delivery_override_status)
+      `,
+    );
+
+    const [reissued] = await asApi(
+      harness.sql,
+      world.tenantA,
+      (tx) => tx<{ issue_delivery_otp: number }[]>`
+        select issue_delivery_otp(
+          ${overrideId}::uuid, decode('aa', 'hex'), decode('bb', 'hex'),
+          ${expiresAt}::timestamptz, true, 5
+        )
+      `,
+    );
+    expect(reissued?.issue_delivery_otp).toBe(1);
+
+    const [row] = await harness.sql<
+      { status: string; resend_count: number; attempt_count: number; otp_hmac: Buffer }[]
+    >`
+      select status, resend_count, attempt_count, otp_hmac
+      from delivery_override where id = ${overrideId}
+    `;
+    expect(row?.status).toBe('ACTIVE');
+    expect(Number(row?.resend_count)).toBe(1);
+    expect(Number(row?.attempt_count)).toBe(0);
+    expect(row?.otp_hmac.toString('hex')).toBe('aa');
+  });
+
+  it('issue_delivery_otp yenileme limitini veritabanında uygular', async () => {
+    const world = await insertWorld(harness.sql);
+    const overrideId = randomUUID();
+    await harness.sql`
+      insert into delivery_override (
+        id, tenant_id, student_id, service_date, address_id,
+        receiver_name, receiver_phone, status, resend_count
+      ) values (
+        ${overrideId}, ${world.tenantA}, ${world.studentId}, '2026-09-09', ${world.addressId},
+        'Teyze', '+905321119992', 'ACTIVE', 5
+      )
+    `;
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    await expect(
+      asApi(
+        harness.sql,
+        world.tenantA,
+        (tx) => tx`
+          select issue_delivery_otp(
+            ${overrideId}::uuid, '\\x00'::bytea, '\\x01'::bytea,
+            ${expiresAt}::timestamptz, true, 5
+          )
+        `,
+      ),
+    ).rejects.toThrow(/otp_resend_limit/);
   });
 
   it('operasyon gerçeğinde plan dropoff yazılamaz', async () => {

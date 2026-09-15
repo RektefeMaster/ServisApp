@@ -39,8 +39,9 @@ export const address = pgTable(
       .notNull()
       .references(() => tenant.id),
     text: text('text').notNull(),
-    il: text('il').notNull(),
-    ilce: text('ilce').notNull(),
+    /** Yalnız görüntü bilgisi; hiçbir kural buna bakmaz (bkz. migration 0036). */
+    il: text('il'),
+    ilce: text('ilce'),
     lat: doublePrecision('lat').notNull(),
     lng: doublePrecision('lng').notNull(),
     geocodeConfidence: real('geocode_confidence'),
@@ -149,6 +150,9 @@ export const staffAssignment = pgTable(
       columns: [t.tenantId, t.membershipId],
       foreignColumns: [tenantMembership.tenantId, tenantMembership.id],
     }),
+    uniqueIndex('staff_assignment_open_unique')
+      .on(t.tenantId, t.vehicleId, t.role)
+      .where(sql`${t.validTo} is null`),
     tenantIsolation('staff_assignment'),
   ],
 ).enableRLS();
@@ -259,6 +263,13 @@ export const route = pgTable(
     segment: segmentEnum('segment').notNull(),
     shiftNo: smallint('shift_no').notNull().default(1),
     maxDetourM: integer('max_detour_m').notNull().default(1500),
+    /** Kiracı saat dilimindeki duvar saati, "HH:MM". Her rota aynı anda çıkmaz. */
+    departureLocalTime: text('departure_local_time').notNull(),
+    /**
+     * "Bu güzergâh artık kullanılmıyor." Sürümün ARCHIVED olması rotanın emekli
+     * olması demek değildi; emekli rota yeni sefer üretmez, yayın kabul etmez.
+     */
+    retiredAt: timestamp('retired_at', { withTimezone: true }),
   },
   (t) => [
     unique('route_vehicle_segment_shift').on(t.tenantId, t.vehicleId, t.segment, t.shiftNo),
@@ -274,6 +285,10 @@ export const route = pgTable(
       foreignColumns: [school.tenantId, school.id],
     }),
     check('route_shift_no', sql`${t.shiftNo} >= 1`),
+    check(
+      'route_departure_local_time',
+      sql`${t.departureLocalTime} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`,
+    ),
     tenantIsolation('route'),
   ],
 ).enableRLS();
@@ -293,6 +308,7 @@ export const routeVersion = pgTable(
   (t) => [
     unique('route_version_no').on(t.tenantId, t.routeId, t.versionNo),
     tenantRowUnique('route_version', t.tenantId, t.id),
+    unique('route_version_route_row_unique').on(t.tenantId, t.routeId, t.id),
     uniqueIndex('route_version_one_published')
       .on(t.tenantId, t.routeId)
       .where(sql`${t.status} = 'PUBLISHED'`),
@@ -431,6 +447,8 @@ export const routeSegmentStat = pgTable(
     avgSeconds: integer('avg_seconds'),
     medianSeconds: integer('median_seconds'),
     p75Seconds: integer('p75_seconds'),
+    /** Son N ölçüm; gerçek medyan/p75 bu pencereden hesaplanır. */
+    recentSeconds: integer('recent_seconds').array().notNull().default([]),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

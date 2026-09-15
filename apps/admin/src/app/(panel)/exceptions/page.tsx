@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/session';
+import { formatDate, overrideStatusLabel, requestStatusLabel } from '@/lib/labels';
 
 interface ExceptionRow {
   id: string;
@@ -84,7 +85,8 @@ export default function ExceptionsPage() {
             ) : (
               body.exceptions.map((row) => (
                 <li key={row.id} className="px-4 py-3">
-                  {row.studentName} · {row.serviceDate} · {row.segment === 'MORNING' ? 'sabah' : 'akşam'}
+                  {row.studentName} · {row.serviceDate} ·{' '}
+                  {row.segment === 'MORNING' ? 'sabah' : 'akşam'}
                   {row.cancelledAt ? ' · iptal' : ''}
                 </li>
               ))
@@ -96,10 +98,16 @@ export default function ExceptionsPage() {
               <li className="px-4 py-3 text-muted">Kayıt yok</li>
             ) : (
               body.overrides.map((row) => (
-                <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+                <li
+                  key={row.id}
+                  className="flex flex-wrap items-center justify-between gap-2 px-4 py-3"
+                >
                   <span>
-                    {row.studentName} · {row.serviceDate} · {row.status} · {row.receiverName} · {row.addressText}
-                    {row.detourM > row.maxDetourM ? ` · +${row.detourM} m (eşik ${row.maxDetourM} m)` : ''}
+                    {row.studentName} · {formatDate(row.serviceDate)} ·{' '}
+                    {overrideStatusLabel(row.status)} · {row.receiverName} · {row.addressText}
+                    {row.detourM > row.maxDetourM
+                      ? ` · +${row.detourM} m (eşik ${row.maxDetourM} m)`
+                      : ''}
                   </span>
                   {row.status === 'PENDING_APPROVAL' ? (
                     <span className="flex gap-3">
@@ -120,7 +128,9 @@ export default function ExceptionsPage() {
                     </span>
                   ) : null}
                   {row.status === 'LOCKED' ? (
-                    <span className="text-muted">Kod kilitli — sefer detayından yönetici teslim onayı</span>
+                    <span className="text-muted">
+                      Kod kilitli — sefer detayından yönetici teslim onayı
+                    </span>
                   ) : null}
                 </li>
               ))
@@ -132,9 +142,13 @@ export default function ExceptionsPage() {
               <li className="px-4 py-3 text-muted">Kayıt yok</li>
             ) : (
               body.addressChanges.map((row) => (
-                <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+                <li
+                  key={row.id}
+                  className="flex flex-wrap items-center justify-between gap-2 px-4 py-3"
+                >
                   <span>
-                    {row.studentName} · {row.status} · {row.effectiveFromDate} · {row.addressText}
+                    {row.studentName} · {requestStatusLabel(row.status)} ·{' '}
+                    {formatDate(row.effectiveFromDate)} · {row.addressText}
                   </span>
                   {row.status === 'PENDING' ? (
                     <span className="flex gap-3">

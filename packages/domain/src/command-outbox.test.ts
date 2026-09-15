@@ -37,6 +37,37 @@ function item(overrides: Partial<OutboxItem>): OutboxItem {
   };
 }
 
+describe('nextDeviceSeq kalıcı taban', () => {
+  const item = (deviceSeq: number): OutboxItem => ({
+    clientEventId: `e${String(deviceSeq)}`,
+    tripId: 't1',
+    tripStudentId: 's1',
+    action: 'BOARD',
+    expectedStateSeq: 0,
+    deviceSeq,
+    occurredAtDevice: '2026-09-12T05:00:00.000Z',
+    status: 'PENDING',
+  });
+
+  it('kuyruk boşalsa da sıra geri sarmaz', () => {
+    // Komut sunucuda işlenip kuyruktan silindi: kuyruk boş, taban 4.
+    expect(nextDeviceSeq([], 4)).toBe(5);
+  });
+
+  it('kuyruktaki en büyük sıra tabandan büyükse onu izler', () => {
+    expect(nextDeviceSeq([item(7)], 2)).toBe(8);
+  });
+
+  it('taban yoksa sıfırdan başlar', () => {
+    expect(nextDeviceSeq([])).toBe(0);
+    expect(nextDeviceSeq([], -1)).toBe(0);
+  });
+
+  it('bozuk taban sıfır kabul edilir', () => {
+    expect(nextDeviceSeq([], Number.NaN)).toBe(0);
+  });
+});
+
 describe('çevrimdışı komut kuyruğu', () => {
   it('iyimser bindirme state_seq artırır; yasadışı teslimi reddeder', () => {
     const boarded = applyOptimistic(efe, 'BOARD', 'ACTIVE', 'DRIVER');
@@ -93,9 +124,11 @@ describe('çevrimdışı komut kuyruğu', () => {
       conflictState: 'NO_SHOW',
       conflictStateSeq: 1,
     });
-    expect(
-      reconcileStudentFromServer(efe, { state: 'NO_SHOW', stateSeq: 1 }, true),
-    ).toMatchObject({ state: 'NO_SHOW', stateSeq: 1, needsReview: true });
+    expect(reconcileStudentFromServer(efe, { state: 'NO_SHOW', stateSeq: 1 }, true)).toMatchObject({
+      state: 'NO_SHOW',
+      stateSeq: 1,
+      needsReview: true,
+    });
   });
 
   it('device_seq boşluksuz artar', () => {

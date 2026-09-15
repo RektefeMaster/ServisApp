@@ -2,7 +2,12 @@ import { PgBoss } from 'pg-boss';
 import { pino } from 'pino';
 import { createDbFromSql, createSql } from '@servisapp/db';
 import { loadEnv } from './env.js';
-import { HORIZON_QUEUE, REPAIR_QUEUE, runTripHorizonJob } from './jobs/horizon.js';
+import {
+  HORIZON_QUEUE,
+  REPAIR_QUEUE,
+  runTripHorizonJob,
+  runTripRepairJob,
+} from './jobs/horizon.js';
 import { LIFECYCLE_QUEUE, runTripLifecycleJob } from './jobs/lifecycle.js';
 import { OUTBOX_QUEUE, runOutboxJob } from './jobs/outbox.js';
 import { createExpoPushSender, createNetgsmSender } from './notify/senders.js';
@@ -37,6 +42,38 @@ boss.on('warning', (warning: unknown) => {
   log.warn({ warning }, 'pg-boss uyari');
 });
 
+/**
+ * Kuyruk işinin hatası GÖRÜNÜR olmak zorundadır.
+ *
+ * Eskiden her handler hatayı ya yutuyor ya da yalnız `log.warn` ile geçiyordu.
+ * Üç sonucu birden vardı: pg-boss işi başarılı sayıyor (`retryLimit` ölü kod),
+ * Sentry hiçbir şey görmüyor, geriye kimsenin bakmadığı tek bir log satırı
+ * kalıyordu. 18:00 ufuk işi bir kiracı için patlarsa, bunu sabah 06:40'ta
+ * şoför keşfeder — 18:00'in seçilme sebebi tam olarak bunu önlemekti (SPEC §12).
+ *
+ * Artık hata Sentry'ye gider ve yeniden fırlatılır: pg-boss yeniden dener.
+ */
+async function runJob(queue: string, run: () => Promise<void>): Promise<void> {
+  try {
+    await run();
+  } catch (error) {
+    log.error({ err: error, queue }, 'kuyruk işi başarısız');
+    Sentry.captureException(error, { tags: { queue } });
+    throw error;
+  }
+}
+
+/**
+ * Kısmi başarısızlık da başarısızlıktır: tek kiracının seferi üretilmediyse
+ * o kiracıda ertesi sabah sefer yoktur. Sayaç loglanır, iş yine de patlar.
+ */
+class JobPartialFailure extends Error {
+  constructor(queue: string, failed: number, cause?: string) {
+    super(`${queue}: ${String(failed)} kiracı başarısız${cause ? ` — ${cause}` : ''}`);
+    this.name = 'JobPartialFailure';
+  }
+}
+
 async function shutdown(signal: string): Promise<void> {
   log.info({ signal }, 'worker kapanış başlıyor');
   try {
@@ -62,24 +99,41 @@ try {
   await boss.createQueue(LIFECYCLE_QUEUE, { retryLimit: 2, notify: true });
 
   await boss.work(PARTITION_QUEUE, async (_jobs) => {
-    await sql`select ensure_month_partitions()`;
-    log.info('partition bakimi tamam');
+    await runJob(PARTITION_QUEUE, async () => {
+      await sql`select ensure_month_partitions()`;
+      log.info('partition bakimi tamam');
+    });
   });
   await boss.work(HORIZON_QUEUE, async (_jobs) => {
-    const result = await runTripHorizonJob(sql, db);
-    if (result.failed > 0) log.warn(result, 'sefer ufku kısmi hata');
-    else log.info(result, 'sefer ufku üretildi');
+    await runJob(HORIZON_QUEUE, async () => {
+      const result = await runTripHorizonJob(sql, db);
+      if (result.failed > 0) {
+        log.error(result, 'sefer ufku kısmi hata');
+        throw new JobPartialFailure(HORIZON_QUEUE, result.failed, result.lastError);
+      }
+      log.info(result, 'sefer ufku üretildi');
+    });
   });
   await boss.work(REPAIR_QUEUE, async (_jobs) => {
-    const result = await runTripHorizonJob(sql, db);
-    if (result.failed > 0) log.warn(result, 'sefer ufku kısmi hata');
-    else log.info(result, 'sefer ufku onarıldı');
+    await runJob(REPAIR_QUEUE, async () => {
+      const result = await runTripRepairJob(sql, db);
+      if (result.failed > 0) {
+        log.error(result, 'sefer onarımı kısmi hata');
+        throw new JobPartialFailure(REPAIR_QUEUE, result.failed, result.lastError);
+      }
+      // `blocked` hata değil: araçtaki çocuk yüzünden plana çekilemeyen sefer
+      // beklenen sonuçtur, yeniden denemek düzeltmez — ama görünür kalmalı.
+      if (result.blocked > 0) log.warn(result, 'sefer onarımı bloklandı');
+      else log.info(result, 'sefer onarıldı');
+    });
   });
   await boss.work(LIFECYCLE_QUEUE, async (_jobs) => {
-    const result = await runTripLifecycleJob(sql);
-    if (result.expiredOverrides > 0 || result.autoClosedTrips > 0) {
-      log.info(result, 'sefer yaşam döngüsü');
-    }
+    await runJob(LIFECYCLE_QUEUE, async () => {
+      const result = await runTripLifecycleJob(sql);
+      if (result.expiredOverrides > 0 || result.autoClosedTrips > 0) {
+        log.info(result, 'sefer yaşam döngüsü');
+      }
+    });
   });
   const push = createExpoPushSender();
   const sms = createNetgsmSender({
@@ -89,13 +143,21 @@ try {
   });
   if (!sms) log.warn('Netgsm yok; davet ve OTP SMS kuyrukta kalır');
   await boss.work(OUTBOX_QUEUE, async (_jobs) => {
-    const result = await runOutboxJob(sql, {
-      encryptionKey: env.OTP_ENCRYPTION_KEY,
-      push,
-      sms,
+    await runJob(OUTBOX_QUEUE, async () => {
+      const result = await runOutboxJob(sql, {
+        encryptionKey: env.OTP_ENCRYPTION_KEY,
+        push,
+        sms,
+      });
+      // `failed` burada sistem hatası DEĞİL: kalıcı teslim başarısızlığı
+      // (24 saati geçmiş satır, geçersiz push jetonu) beklenen sonuçtur ve
+      // yeniden denemek düzeltmez. Fırlatmak kuyruğu boşuna döndürürdü.
+      // Gerçek hata (DB, kiracı listesi) zaten runJob'a düşer.
+      if (result.failed > 0) log.warn(result, 'bildirim outbox kısmi hata');
+      else if (result.notifications > 0 || result.inviteSms > 0) {
+        log.info(result, 'bildirim outbox');
+      }
     });
-    if (result.failed > 0) log.warn(result, 'bildirim outbox kısmi hata');
-    else if (result.notifications > 0 || result.inviteSms > 0) log.info(result, 'bildirim outbox');
   });
 
   await boss.schedule(PARTITION_QUEUE, '15 3 1 * *');

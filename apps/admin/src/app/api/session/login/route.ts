@@ -33,30 +33,48 @@ export async function POST(request: Request) {
   const parsed = (await request.json().catch(() => null)) as {
     email?: unknown;
     password?: unknown;
+    accessToken?: unknown;
   } | null;
-  const email = typeof parsed?.email === 'string' ? parsed.email : '';
-  const password = typeof parsed?.password === 'string' ? parsed.password : '';
-  if (!email || !password) {
-    return NextResponse.json({ error: 'invalid_body', message: 'Giriş başarısız' }, { status: 400 });
-  }
 
-  const login = await fetch(apiUrl('/v1/dev/login'), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  const loginBody = (await login.json().catch(() => ({}))) as DevLoginBody;
-  if (!login.ok || typeof loginBody.token !== 'string') {
-    return NextResponse.json(
-      { error: 'unauthorized', message: loginBody.message ?? 'Giriş başarısız' },
-      { status: login.status === 401 || login.status === 403 ? 401 : login.status },
-    );
+  /**
+   * İki yol vardır ve ikisi de gereklidir:
+   *  - Üretim: tarayıcı Supabase Auth ile giriş yapar, jetonu buraya verir ve
+   *    biz onu httpOnly çerezle takas ederiz. (Eskiden bu yol hiç yoktu; panel
+   *    yalnız `/v1/dev/login` çağırıyordu ve o uç üretimde HİÇ kayıtlı değil —
+   *    yani üretimde hiçbir yönetici panele giremiyordu.)
+   *  - Yerel geliştirme: Supabase kurulu değilken e-posta + parola.
+   */
+  const accessToken = typeof parsed?.accessToken === 'string' ? parsed.accessToken : '';
+  let token = accessToken;
+
+  if (!token) {
+    const email = typeof parsed?.email === 'string' ? parsed.email : '';
+    const password = typeof parsed?.password === 'string' ? parsed.password : '';
+    if (!email || !password) {
+      return NextResponse.json(
+        { error: 'invalid_body', message: 'Giriş başarısız' },
+        { status: 400 },
+      );
+    }
+    const login = await fetch(apiUrl('/v1/dev/login'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const loginBody = (await login.json().catch(() => ({}))) as DevLoginBody;
+    if (!login.ok || typeof loginBody.token !== 'string') {
+      return NextResponse.json(
+        { error: 'unauthorized', message: loginBody.message ?? 'Giriş başarısız' },
+        { status: login.status === 401 || login.status === 403 ? 401 : login.status },
+      );
+    }
+    token = loginBody.token;
   }
 
   const sessionRes = await fetch(apiUrl('/v1/session'), {
     headers: {
       accept: 'application/json',
-      authorization: `Bearer ${loginBody.token}`,
+      authorization: `Bearer ${token}`,
       'x-client': 'admin',
       'x-app-version': ADMIN_APP_VERSION,
     },
@@ -83,7 +101,7 @@ export async function POST(request: Request) {
     fullName: session.fullName ?? '',
     memberships: session.memberships,
   });
-  response.cookies.set(ADMIN_TOKEN_COOKIE, loginBody.token, cookie);
+  response.cookies.set(ADMIN_TOKEN_COOKIE, token, cookie);
   response.cookies.set(ADMIN_TENANT_COOKIE, admin.tenantId, cookie);
   return response;
 }

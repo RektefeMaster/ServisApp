@@ -1,4 +1,12 @@
-import { createCipheriv, createDecipheriv, createHmac, createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  createHash,
+  randomBytes,
+  randomInt,
+  timingSafeEqual,
+} from 'node:crypto';
 
 const CODE_DIGITS = 6;
 

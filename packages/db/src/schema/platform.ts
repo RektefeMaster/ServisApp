@@ -14,6 +14,13 @@ export const platformSettings = pgTable(
     killGps: boolean('kill_gps').notNull().default(false),
     killOtp: boolean('kill_otp').notNull().default(false),
     killRealtime: boolean('kill_realtime').notNull().default(false),
+    /**
+     * Geliştirme girişi fonksiyonları yalnız bu bayrak açıkken cevap verir.
+     * Varsayılan kapalı: üretim şemasında dururlar ama ölüdürler (bkz. 0041).
+     * `servisapp_api` bu satırı UPDATE edemez; bayrak migration bağlantısıyla
+     * açılır.
+     */
+    devLoginEnabled: boolean('dev_login_enabled').notNull().default(false),
     flags: jsonb('flags')
       .notNull()
       .default(sql`'{}'::jsonb`),
@@ -24,6 +31,13 @@ export const platformSettings = pgTable(
       as: 'permissive',
       for: 'select',
       to: ['servisapp_api', 'servisapp_worker'],
+      using: sql`true`,
+    }),
+    // Dev-login kapısını okuyan definer fonksiyonlar için (bkz. 0041).
+    pgPolicy('platform_settings_definer_read', {
+      as: 'permissive',
+      for: 'select',
+      to: ['servisapp_definer'],
       using: sql`true`,
     }),
   ],

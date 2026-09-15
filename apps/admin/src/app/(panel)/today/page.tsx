@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/session';
+import { segmentLabel, tripStateLabel } from '@/lib/labels';
 
 function todayYmd(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(new Date());
@@ -24,23 +25,54 @@ interface PriorityRow {
   body: string;
 }
 
+const REFRESH_MS = 30_000;
+
 export default function TodayPage() {
   const [items, setItems] = useState<TripRow[]>([]);
   const [priorities, setPriorities] = useState<PriorityRow[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const date = todayYmd();
+  const [date, setDate] = useState(todayYmd());
 
+  /**
+   * Sevkiyat ekranı düzenli tazelenir.
+   *
+   * Eskiden bir kez çekiliyordu: 07:00'de açılan ekran, 07:40'ta çıkan KRİTİK
+   * bir uyarıyı (bozulan araç, eksik mürettebat, kaybolan konum) hiç
+   * göstermiyordu. Gün de mount anında sabitlendiği için gece yarısını geçen
+   * açık bir masa hâlâ dünü gösteriyordu.
+   */
   useEffect(() => {
-    void Promise.all([
-      apiFetch<{ items: TripRow[] }>(`/v1/admin/trips?date=${date}`),
-      apiFetch<{ items: PriorityRow[] }>(`/v1/admin/priorities?date=${date}`),
-    ])
-      .then(([trips, next]) => {
-        setItems(trips.items);
-        setPriorities(next.items);
-      })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : 'Okunamadı'));
-  }, [date]);
+    let cancelled = false;
+    const load = (): void => {
+      const today = todayYmd();
+      setDate(today);
+      void Promise.all([
+        apiFetch<{ items: TripRow[] }>(`/v1/admin/trips?date=${today}`),
+        apiFetch<{ items: PriorityRow[] }>(`/v1/admin/priorities?date=${today}`),
+      ])
+        .then(([trips, next]) => {
+          if (cancelled) return;
+          setItems(trips.items);
+          setPriorities(next.items);
+          setError(null);
+        })
+        .catch((caught: unknown) => {
+          if (cancelled) return;
+          setError(caught instanceof Error ? caught.message : 'Okunamadı');
+        });
+    };
+    load();
+    const timer = setInterval(load, REFRESH_MS);
+    const onFocus = (): void => {
+      load();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, []);
 
   return (
     <div>
@@ -53,7 +85,10 @@ export default function TodayPage() {
           <li className="px-4 py-6 text-sm text-muted">Bekleyen öncelik yok.</li>
         ) : (
           priorities.map((item, index) => (
-            <li key={`${item.kind}-${item.tripId ?? item.body}-${index}`} className="px-4 py-3 text-sm">
+            <li
+              key={`${item.kind}-${item.tripId ?? item.body}-${index}`}
+              className="px-4 py-3 text-sm"
+            >
               <span className={item.severity === 'CRITICAL' ? 'text-red-700' : 'text-muted'}>
                 {item.severity === 'CRITICAL' ? 'Kritik' : 'Uyarı'}
               </span>
@@ -76,12 +111,15 @@ export default function TodayPage() {
           <li className="px-4 py-6 text-sm text-muted">Bugün sefer yok.</li>
         ) : (
           items.map((item) => (
-            <li key={item.id} className="flex items-center justify-between px-4 py-3 text-sm">
+            <li
+              key={item.id}
+              className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-3 text-sm"
+            >
               <span>
-                {item.plate} · {item.schoolName} · {item.segment === 'MORNING' ? 'Sabah' : 'Akşam'}
+                {item.plate} · {item.schoolName} · {segmentLabel(item.segment)}
               </span>
               <Link className="underline" href={`/trips/${item.id}`}>
-                {item.state}
+                {tripStateLabel(item.state)}
               </Link>
             </li>
           ))

@@ -126,7 +126,8 @@ describe('computeGoogleRouteBaseline', () => {
   it('HTTP hatasında haversine’e düşmek için null döner', async () => {
     const result = await computeGoogleRouteBaseline(points, new Date(), {
       apiKey: 'test-key-xx',
-      fetchImpl: (() => Promise.resolve({ ok: false, json: () => Promise.resolve({}) })) as unknown as typeof fetch,
+      fetchImpl: (() =>
+        Promise.resolve({ ok: false, json: () => Promise.resolve({}) })) as unknown as typeof fetch,
     });
     expect(result).toBeNull();
   });

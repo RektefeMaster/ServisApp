@@ -44,6 +44,8 @@ import {
   canGuardianReceiveChild,
   canTransitionTrip,
   tripReadyCrewBlock,
+  vehicleComplianceBlock,
+  vehicleComplianceMessage,
   deliveryTargetForSegment,
   evaluateStudentUndo,
   expectedStopKind,
@@ -63,7 +65,7 @@ import {
   type StudentState,
   type TripState,
 } from '@servisapp/domain';
-import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http-error.js';
 import { isUniqueViolation, mapDbError } from './db-error.js';
 import {
@@ -83,7 +85,7 @@ import type {
   TripSummary,
 } from './ports.js';
 import { studentHomePoints } from './student-home.js';
-import { writeHaversineBaseline } from './tracking.js';
+import { drainBaselineRefines, requestBaselineRefine, writeBaseline } from './tracking.js';
 import { queueGuardianNotifications } from './notify-queue.js';
 import { firstRow, isRecord, jsonObject } from './sql-result.js';
 
@@ -176,6 +178,7 @@ export function createTripPort(
         }
         if (input.phase === 'BEFORE' && row.state === 'PLANNED') {
           await assertTripReadyCrew(tx, tenantId, row);
+          await assertVehicleDocuments(tx, tenantId, row);
           await assertTripResourcesIdle(tx, {
             tenantId,
             tripId,
@@ -239,6 +242,7 @@ export function createTripPort(
         }
         if (row.state === 'PLANNED') {
           await assertTripReadyCrew(tx, tenantId, row);
+          await assertVehicleDocuments(tx, tenantId, row);
           await assertTripResourcesIdle(tx, {
             tenantId,
             tripId,
@@ -261,6 +265,7 @@ export function createTripPort(
           row.state = 'READY';
         }
         await assertTripReadyCrew(tx, tenantId, row);
+        await assertVehicleDocuments(tx, tenantId, row);
         await assertTripResourcesIdle(tx, {
           tenantId,
           tripId,
@@ -295,8 +300,15 @@ export function createTripPort(
         });
         const next = await loadTripSummary(tx, tenantId, tripId);
         if (!next) throw notFound('Sefer bulunamadı');
-        await writeHaversineBaseline(tx, tenantId, tripId);
+        if (await writeBaseline(tx, tenantId, tripId)) {
+          await requestBaselineRefine(tx, tenantId, tripId);
+        }
         return next;
+        // Google yol bilgisi transaction KAPANDIKTAN sonra istenir: şoförün
+        // "başlat" düğmesi dış sağlayıcıyı beklemez.
+      }).then(async (summary) => {
+        await drainBaselineRefines(db);
+        return summary;
       });
     },
 
@@ -479,12 +491,7 @@ export function createTripPort(
           return body;
         }
         if (input.receiverMembershipId) {
-          await assertReceiverAllowed(
-            tx,
-            tenantId,
-            locked.studentId,
-            input.receiverMembershipId,
-          );
+          await assertReceiverAllowed(tx, tenantId, locked.studentId, input.receiverMembershipId);
         }
 
         const applied = await applyLockedTransition(tx, {
@@ -661,10 +668,7 @@ async function generateHorizonTx(
         else skipped += 1;
       } catch (error) {
         await tx.execute(sql`rollback to savepoint gen_one`);
-        if (
-          isUniqueViolation(error, 'trip_route_date') ||
-          isUniqueViolation(error, 'service_date')
-        ) {
+        if (isUniqueViolation(error, 'trip_route_date')) {
           skipped += 1;
         } else {
           throw error;
@@ -677,7 +681,7 @@ async function generateHorizonTx(
   return { created: tripIds.length, skipped, tripIds };
 }
 
-interface PublishedRoute {
+export interface PublishedRoute {
   routeId: string;
   vehicleId: string;
   schoolId: string;
@@ -685,67 +689,45 @@ interface PublishedRoute {
   versionId: string;
   effectiveFrom: string | Date;
   maxDetourM: number;
+  departureLocalTime: string;
 }
 
-async function generateOne(
+interface PlannedStudent {
+  studentId: string;
+  origin: 'FROM_ROUTE' | 'MOVED_IN';
+  state: StudentState;
+  routeStopIds: string[];
+}
+
+export type TripSnapshotPlan = NonNullable<Awaited<ReturnType<typeof buildTripPlan>>>;
+
+/**
+ * Sefer anlığının ham maddesi: rota sürümünün durakları, o güne düşen öğrenciler
+ * ve akşam için ACTIVE farklı teslimatlar. Hem ilk üretim hem de plan değişince
+ * yapılan yeniden kurulum aynı kaynaktan beslenir.
+ */
+export async function buildTripPlan(
   tx: Database,
   input: {
     tenantId: string;
-    timezone: string;
     serviceDate: string;
     route: PublishedRoute;
   },
-): Promise<string | null> {
-  const { tenantId, timezone, serviceDate: day } = input;
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtext(${`${tenantId}:${input.route.routeId}`}), hashtext(${day}))`,
-  );
-  const [existing] = await tx
-    .select({ id: trip.id })
-    .from(trip)
-    .where(
-      and(
-        eq(trip.tenantId, tenantId),
-        eq(trip.routeId, input.route.routeId),
-        eq(trip.serviceDate, day),
-      ),
-    );
-  if (existing) {
-    return null;
-  }
-
-  const [holiday] = await tx
-    .select({ date: schoolCalendarDay.date })
-    .from(schoolCalendarDay)
-    .where(
-      and(
-        eq(schoolCalendarDay.tenantId, tenantId),
-        eq(schoolCalendarDay.schoolId, input.route.schoolId),
-        eq(schoolCalendarDay.date, day),
-        eq(schoolCalendarDay.type, 'HOLIDAY'),
-      ),
-    );
-  if (holiday) return null;
-
-  const dayStart = zonedDayStart(day, timezone);
-  const dayEnd = zonedDayEnd(day, timezone);
-  const driverId = await assignedCrew(
-    tx,
-    tenantId,
-    input.route.vehicleId,
-    'DRIVER',
-    dayStart,
-    dayEnd,
-  );
-  const attendantId = await assignedCrew(
-    tx,
-    tenantId,
-    input.route.vehicleId,
-    'ATTENDANT',
-    dayStart,
-    dayEnd,
-  );
-
+): Promise<{
+  stopRows: Array<{
+    routeStopId: string;
+    stopId: string;
+    seq: number;
+    kind: 'PICKUP' | 'DROPOFF' | 'SCHOOL';
+    lat: number;
+    lng: number;
+    label: string;
+    addressText: string;
+  }>;
+  planned: Map<string, PlannedStudent>;
+  overrideSnaps: Map<string, { receiverName: string; lat: number; lng: number; text: string }>;
+} | null> {
+  const { tenantId, serviceDate: day } = input;
   const stopRows = await tx
     .select({
       routeStopId: routeStop.id,
@@ -821,13 +803,7 @@ async function generateOne(
     ),
   ];
 
-  type Planned = {
-    studentId: string;
-    origin: 'FROM_ROUTE' | 'MOVED_IN';
-    state: StudentState;
-    routeStopIds: string[];
-  };
-  const planned = new Map<string, Planned>();
+  const planned = new Map<string, PlannedStudent>();
   for (const row of assigned) {
     if (dateOnly(row.enrollmentStart) > day) continue;
     if (row.enrollmentEnd && dateOnly(row.enrollmentEnd) < day) continue;
@@ -836,9 +812,9 @@ async function generateOne(
     let state: StudentState = 'EXPECTED';
     if (moveOut.has(row.studentId)) state = 'MOVED_OUT';
     else if (exceptionSet.has(row.studentId)) state = 'ABSENT_PLANNED';
-    const existing = planned.get(row.studentId);
-    if (existing) {
-      existing.routeStopIds.push(row.routeStopId);
+    const already = planned.get(row.studentId);
+    if (already) {
+      already.routeStopIds.push(row.routeStopId);
       continue;
     }
     planned.set(row.studentId, {
@@ -903,7 +879,235 @@ async function generateOne(
     }
   }
 
-  const departure = plannedDepartureAt(day, input.route.segment, timezone);
+  return { stopRows, planned, overrideSnaps };
+}
+
+/** Sefer satırı hazırken durak ve öğrenci kopyalarını yazar. */
+export async function writeTripSnapshot(
+  tx: Database,
+  input: {
+    tenantId: string;
+    tripId: string;
+    serviceDate: string;
+    segment: 'MORNING' | 'AFTERNOON';
+    plan: TripSnapshotPlan;
+  },
+): Promise<void> {
+  const { tenantId } = input;
+  const day = input.serviceDate;
+  const { stopRows, planned, overrideSnaps } = input.plan;
+  const tripStopByRouteStop = new Map<string, string>();
+  let schoolTripStopId: string | null = null;
+  let firstPickupTripStopId: string | null = null;
+  let lastDropoffTripStopId: string | null = null;
+  let schoolSnap: { lat: number; lng: number; text: string } | null = null;
+  for (const row of stopRows) {
+    const [inserted] = await tx
+      .insert(tripStop)
+      .values({
+        tenantId,
+        tripId: input.tripId,
+        seq: String(row.seq),
+        kind: row.kind,
+        sourceStopId: row.stopId,
+        snapshotLat: row.lat,
+        snapshotLng: row.lng,
+        snapshotLabel: row.label,
+        snapshotAddressText: row.addressText,
+      })
+      .returning({ id: tripStop.id });
+    if (!inserted) throw new HttpError(500, 'insert_failed', 'Sefer durağı kopyalanamadı');
+    tripStopByRouteStop.set(row.routeStopId, inserted.id);
+    if (row.kind === 'SCHOOL') {
+      schoolTripStopId = inserted.id;
+      schoolSnap = { lat: row.lat, lng: row.lng, text: row.addressText };
+    }
+    if (row.kind === 'PICKUP' && firstPickupTripStopId === null) {
+      firstPickupTripStopId = inserted.id;
+    }
+    if (row.kind === 'DROPOFF') lastDropoffTripStopId = inserted.id;
+  }
+
+  const expectKind = expectedStopKind(input.segment);
+  const target = deliveryTargetForSegment(input.segment);
+  const kindByRouteStop = new Map(stopRows.map((row) => [row.routeStopId, row.kind]));
+  const moveInHomes = await studentHomePoints(
+    tx,
+    tenantId,
+    [...planned.values()]
+      .filter((item) => item.origin === 'MOVED_IN')
+      .map((item) => item.studentId),
+    day,
+    input.segment,
+  );
+
+  for (const item of planned.values()) {
+    const linkedTripStopIds: string[] = [];
+    for (const routeStopId of item.routeStopIds) {
+      const tripStopId = tripStopByRouteStop.get(routeStopId);
+      if (!tripStopId) continue;
+      linkedTripStopIds.push(tripStopId);
+      await tx.insert(tripStopStudent).values({
+        tenantId,
+        tripStopId,
+        studentId: item.studentId,
+      });
+    }
+    let expectedId: string | null;
+    let stopSnap: { lat: number; lng: number; addressText: string } | undefined;
+    if (item.origin === 'MOVED_IN') {
+      const home = moveInHomes.get(item.studentId) ?? null;
+      const picked = pickStudentAnchorStop(
+        stopRows.map((row) => ({
+          routeStopId: row.routeStopId,
+          kind: row.kind,
+          lat: row.lat,
+          lng: row.lng,
+        })),
+        home,
+        input.segment,
+      );
+      if (!picked) {
+        throw new HttpError(
+          409,
+          home ? 'stop_not_on_route' : 'student_address_missing',
+          home
+            ? 'Transfer öğrencisinin adresi hedef rotada durakla eşleşmiyor'
+            : 'Transfer öğrencisinin adresi yok',
+        );
+      }
+      expectedId = tripStopByRouteStop.get(picked.routeStopId) ?? null;
+      if (expectedId && !linkedTripStopIds.includes(expectedId)) {
+        await tx.insert(tripStopStudent).values({
+          tenantId,
+          tripStopId: expectedId,
+          studentId: item.studentId,
+        });
+      }
+      const pickedRow = stopRows.find((row) => row.routeStopId === picked.routeStopId);
+      if (pickedRow) {
+        stopSnap = { lat: pickedRow.lat, lng: pickedRow.lng, addressText: pickedRow.addressText };
+      }
+    } else {
+      const preferredRouteStopId =
+        item.routeStopIds.find((id) => kindByRouteStop.get(id) === expectKind) ??
+        item.routeStopIds[0] ??
+        null;
+      expectedId = preferredRouteStopId
+        ? (tripStopByRouteStop.get(preferredRouteStopId) ?? null)
+        : expectKind === 'DROPOFF'
+          ? (lastDropoffTripStopId ?? schoolTripStopId)
+          : (firstPickupTripStopId ?? schoolTripStopId);
+      const preferred = preferredRouteStopId
+        ? stopRows.find((row) => row.routeStopId === preferredRouteStopId)
+        : undefined;
+      if (preferred) {
+        stopSnap = { lat: preferred.lat, lng: preferred.lng, addressText: preferred.addressText };
+      } else if (input.segment === 'AFTERNOON') {
+        const last = stopRows.find(
+          (row) => tripStopByRouteStop.get(row.routeStopId) === lastDropoffTripStopId,
+        );
+        if (last) stopSnap = { lat: last.lat, lng: last.lng, addressText: last.addressText };
+      }
+    }
+    const dropoff =
+      input.segment === 'MORNING'
+        ? schoolSnap
+        : stopSnap
+          ? { lat: stopSnap.lat, lng: stopSnap.lng, text: stopSnap.addressText }
+          : schoolSnap;
+    const override = overrideSnaps.get(item.studentId);
+    const useTemp =
+      Boolean(override) && item.state !== 'ABSENT_PLANNED' && item.state !== 'MOVED_OUT';
+    const tempSnap = useTemp && override ? override : null;
+    await tx.insert(tripStudent).values({
+      tenantId,
+      tripId: input.tripId,
+      studentId: item.studentId,
+      state: item.state,
+      deliveryTarget: tempSnap ? 'TEMP' : target,
+      expectedStopId: expectedId,
+      snapshotDropoffLat: tempSnap?.lat ?? dropoff?.lat,
+      snapshotDropoffLng: tempSnap?.lng ?? dropoff?.lng,
+      snapshotDropoffText: tempSnap?.text ?? dropoff?.text,
+      receiverName: tempSnap?.receiverName ?? null,
+      origin: item.origin,
+    });
+  }
+}
+
+async function generateOne(
+  tx: Database,
+  input: {
+    tenantId: string;
+    timezone: string;
+    serviceDate: string;
+    route: PublishedRoute;
+  },
+): Promise<string | null> {
+  const { tenantId, timezone, serviceDate: day } = input;
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtext(${`${tenantId}:${input.route.routeId}`}), hashtext(${day}))`,
+  );
+  const [existing] = await tx
+    .select({ id: trip.id })
+    .from(trip)
+    .where(
+      and(
+        eq(trip.tenantId, tenantId),
+        eq(trip.routeId, input.route.routeId),
+        eq(trip.serviceDate, day),
+      ),
+    );
+  if (existing) {
+    return null;
+  }
+
+  const [holiday] = await tx
+    .select({ date: schoolCalendarDay.date })
+    .from(schoolCalendarDay)
+    .where(
+      and(
+        eq(schoolCalendarDay.tenantId, tenantId),
+        eq(schoolCalendarDay.schoolId, input.route.schoolId),
+        eq(schoolCalendarDay.date, day),
+        eq(schoolCalendarDay.type, 'HOLIDAY'),
+      ),
+    );
+  if (holiday) return null;
+
+  const dayStart = zonedDayStart(day, timezone);
+  const dayEnd = zonedDayEnd(day, timezone);
+  const driverId = await assignedCrew(
+    tx,
+    tenantId,
+    input.route.vehicleId,
+    'DRIVER',
+    dayStart,
+    dayEnd,
+  );
+  const attendantId = await assignedCrew(
+    tx,
+    tenantId,
+    input.route.vehicleId,
+    'ATTENDANT',
+    dayStart,
+    dayEnd,
+  );
+
+  const plan = await buildTripPlan(tx, {
+    tenantId,
+    serviceDate: day,
+    route: input.route,
+  });
+  if (!plan) return null;
+
+  const departure = plannedDepartureAt(
+    day,
+    input.route.segment,
+    timezone,
+    input.route.departureLocalTime,
+  );
   const [created] = await tx
     .insert(trip)
     .values({
@@ -946,146 +1150,13 @@ async function generateOne(
     });
   }
 
-  const tripStopByRouteStop = new Map<string, string>();
-  let schoolTripStopId: string | null = null;
-  let firstPickupTripStopId: string | null = null;
-  let lastDropoffTripStopId: string | null = null;
-  let schoolSnap: { lat: number; lng: number; text: string } | null = null;
-  for (const row of stopRows) {
-    const [inserted] = await tx
-      .insert(tripStop)
-      .values({
-        tenantId,
-        tripId: created.id,
-        seq: String(row.seq),
-        kind: row.kind,
-        sourceStopId: row.stopId,
-        snapshotLat: row.lat,
-        snapshotLng: row.lng,
-        snapshotLabel: row.label,
-        snapshotAddressText: row.addressText,
-      })
-      .returning({ id: tripStop.id });
-    if (!inserted) throw new HttpError(500, 'insert_failed', 'Sefer durağı kopyalanamadı');
-    tripStopByRouteStop.set(row.routeStopId, inserted.id);
-    if (row.kind === 'SCHOOL') {
-      schoolTripStopId = inserted.id;
-      schoolSnap = { lat: row.lat, lng: row.lng, text: row.addressText };
-    }
-    if (row.kind === 'PICKUP' && firstPickupTripStopId === null) {
-      firstPickupTripStopId = inserted.id;
-    }
-    if (row.kind === 'DROPOFF') lastDropoffTripStopId = inserted.id;
-  }
-
-  const expectKind = expectedStopKind(input.route.segment);
-  const target = deliveryTargetForSegment(input.route.segment);
-  const kindByRouteStop = new Map(stopRows.map((row) => [row.routeStopId, row.kind]));
-  const moveInHomes = await studentHomePoints(
-    tx,
+  await writeTripSnapshot(tx, {
     tenantId,
-    [...planned.values()]
-      .filter((item) => item.origin === 'MOVED_IN')
-      .map((item) => item.studentId),
-    day,
-    input.route.segment,
-  );
-
-  for (const item of planned.values()) {
-    const linkedTripStopIds: string[] = [];
-    for (const routeStopId of item.routeStopIds) {
-      const tripStopId = tripStopByRouteStop.get(routeStopId);
-      if (!tripStopId) continue;
-      linkedTripStopIds.push(tripStopId);
-      await tx.insert(tripStopStudent).values({
-        tenantId,
-        tripStopId,
-        studentId: item.studentId,
-      });
-    }
-    let expectedId: string | null;
-    let stopSnap:
-      | { lat: number; lng: number; addressText: string }
-      | undefined;
-    if (item.origin === 'MOVED_IN') {
-      const home = moveInHomes.get(item.studentId) ?? null;
-      const picked = pickStudentAnchorStop(
-        stopRows.map((row) => ({
-          routeStopId: row.routeStopId,
-          kind: row.kind,
-          lat: row.lat,
-          lng: row.lng,
-        })),
-        home,
-        input.route.segment,
-      );
-      if (!picked) {
-        throw new HttpError(
-          409,
-          home ? 'stop_not_on_route' : 'student_address_missing',
-          home
-            ? 'Transfer öğrencisinin adresi hedef rotada durakla eşleşmiyor'
-            : 'Transfer öğrencisinin adresi yok',
-        );
-      }
-      expectedId = tripStopByRouteStop.get(picked.routeStopId) ?? null;
-      if (expectedId && !linkedTripStopIds.includes(expectedId)) {
-        await tx.insert(tripStopStudent).values({
-          tenantId,
-          tripStopId: expectedId,
-          studentId: item.studentId,
-        });
-      }
-      const pickedRow = stopRows.find((row) => row.routeStopId === picked.routeStopId);
-      if (pickedRow) {
-        stopSnap = { lat: pickedRow.lat, lng: pickedRow.lng, addressText: pickedRow.addressText };
-      }
-    } else {
-      const preferredRouteStopId =
-        item.routeStopIds.find((id) => kindByRouteStop.get(id) === expectKind) ??
-        item.routeStopIds[0] ??
-        null;
-      expectedId = preferredRouteStopId
-        ? (tripStopByRouteStop.get(preferredRouteStopId) ?? null)
-        : expectKind === 'DROPOFF'
-          ? (lastDropoffTripStopId ?? schoolTripStopId)
-          : (firstPickupTripStopId ?? schoolTripStopId);
-      const preferred = preferredRouteStopId
-        ? stopRows.find((row) => row.routeStopId === preferredRouteStopId)
-        : undefined;
-      if (preferred) {
-        stopSnap = { lat: preferred.lat, lng: preferred.lng, addressText: preferred.addressText };
-      } else if (input.route.segment === 'AFTERNOON') {
-        const last = stopRows.find(
-          (row) => tripStopByRouteStop.get(row.routeStopId) === lastDropoffTripStopId,
-        );
-        if (last) stopSnap = { lat: last.lat, lng: last.lng, addressText: last.addressText };
-      }
-    }
-    const dropoff =
-      input.route.segment === 'MORNING'
-        ? schoolSnap
-        : stopSnap
-          ? { lat: stopSnap.lat, lng: stopSnap.lng, text: stopSnap.addressText }
-          : schoolSnap;
-    const override = overrideSnaps.get(item.studentId);
-    const useTemp =
-      Boolean(override) && item.state !== 'ABSENT_PLANNED' && item.state !== 'MOVED_OUT';
-    const tempSnap = useTemp && override ? override : null;
-    await tx.insert(tripStudent).values({
-      tenantId,
-      tripId: created.id,
-      studentId: item.studentId,
-      state: item.state,
-      deliveryTarget: tempSnap ? 'TEMP' : target,
-      expectedStopId: expectedId,
-      snapshotDropoffLat: tempSnap?.lat ?? dropoff?.lat,
-      snapshotDropoffLng: tempSnap?.lng ?? dropoff?.lng,
-      snapshotDropoffText: tempSnap?.text ?? dropoff?.text,
-      receiverName: tempSnap?.receiverName ?? null,
-      origin: item.origin,
-    });
-  }
+    tripId: created.id,
+    serviceDate: day,
+    segment: input.route.segment,
+    plan,
+  });
 
   await insertEvent(tx, {
     tenantId,
@@ -1134,13 +1205,14 @@ async function assignedCrew(
         eq(staffAssignment.role, role),
         lt(staffAssignment.validFrom, dayEnd),
         or(isNull(staffAssignment.validTo), gt(staffAssignment.validTo, dayStart)),
-        inArray(tenantMembership.status, ['ACTIVE', 'INVITED']),
+        // Yalnız ACTIVE. Daveti kabul etmemiş (INVITED) kişi plan üzerinde
+        // görünebilir ama operasyonel mürettebat sayılmaz: aksi halde sefer,
+        // hesabını hiç açmamış bir şoförle "crew_incomplete değil" sayılıp
+        // READY olabiliyordu.
+        eq(tenantMembership.status, 'ACTIVE'),
       ),
     )
-    .orderBy(
-      sql`case when ${tenantMembership.status} = 'ACTIVE' then 0 else 1 end`,
-      desc(staffAssignment.validFrom),
-    )
+    .orderBy(desc(staffAssignment.validFrom))
     .limit(1);
   return rows[0]?.membershipId ?? null;
 }
@@ -1464,7 +1536,10 @@ async function loadReceivableGuardians(
   tenantId: string,
   studentIds: string[],
 ): Promise<Map<string, Array<{ membershipId: string; fullName: string; relation: string }>>> {
-  const map = new Map<string, Array<{ membershipId: string; fullName: string; relation: string }>>();
+  const map = new Map<
+    string,
+    Array<{ membershipId: string; fullName: string; relation: string }>
+  >();
   if (studentIds.length === 0) return map;
   const rows = await tx
     .select({
@@ -1490,6 +1565,10 @@ async function loadReceivableGuardians(
         inArray(studentGuardian.studentId, studentIds),
         eq(studentGuardian.status, 'ACTIVE'),
         eq(studentGuardian.canReceiveChild, true),
+        // Askıya alınmış / iptal edilmiş üyelik kapıda "çocuğu alabilir" olarak
+        // görünmemeli. Daveti henüz açmamış (INVITED) anne ise çocuğunu elbette
+        // alabilir: yetki uygulamayı kurmaktan değil student_guardian'dan gelir.
+        inArray(tenantMembership.status, ['ACTIVE', 'INVITED']),
       ),
     )
     .orderBy(asc(identity.fullName));
@@ -1541,6 +1620,7 @@ async function loadCrewGuardians(
       and(
         eq(studentGuardian.tenantId, tenantId),
         eq(studentGuardian.status, 'ACTIVE'),
+        inArray(tenantMembership.status, ['ACTIVE', 'INVITED']),
         inArray(studentGuardian.studentId, studentIds),
       ),
     );
@@ -1608,6 +1688,11 @@ async function assignedTripIds(
 ): Promise<Set<string>> {
   if (tripIds.length === 0) return new Set();
   const now = new Date();
+  // Erişim penceresi seferin "ilgili anı"nda değerlendirilir: gelecekteki sefer
+  // için planlanan kalkış, başlamış/geçmiş sefer için şimdi. Yalnız kalkışa
+  // bakmak, kalkıştan SONRA atanan yedek şoförü kendi seferinden kilitliyordu;
+  // yalnız şimdiye bakmak ise yarının nöbetini bugünden göstermezdi.
+  const at = sql`greatest(${now.toISOString()}::timestamptz, ${trip.plannedDepartureAt})`;
   const rows = await tx
     .select({ tripId: tripCrewAssignment.tripId })
     .from(tripCrewAssignment)
@@ -1617,8 +1702,8 @@ async function assignedTripIds(
         eq(tripCrewAssignment.tenantId, tenantId),
         eq(tripCrewAssignment.membershipId, membershipId),
         inArray(tripCrewAssignment.tripId, tripIds),
-        or(isNull(tripCrewAssignment.validTo), gt(tripCrewAssignment.validTo, now)),
-        lte(tripCrewAssignment.validFrom, trip.plannedDepartureAt),
+        sql`${tripCrewAssignment.validFrom} <= ${at}`,
+        sql`(${tripCrewAssignment.validTo} is null or ${tripCrewAssignment.validTo} > ${at})`,
       ),
     );
   return new Set(rows.map((row) => row.tripId));
@@ -1667,6 +1752,33 @@ async function hasCheck(
       ),
     );
   return Boolean(row);
+}
+
+/**
+ * Muayenesi veya sigortası geçmiş araçla çocuk taşınmaz. Kaçış kapısı "zorla
+ * başlat" değil, aracı değiştirmektir: yönetici `/v1/admin/trips/:id/vehicle`
+ * ile uygun aracı atar. Yaklaşan bitişler günler öncesinden öncelik listesinde
+ * görünür, bu yüzden kapıda sürpriz olmaz.
+ */
+async function assertVehicleDocuments(tx: Database, tenantId: string, row: TripRow): Promise<void> {
+  const [documents] = await tx
+    .select({
+      plate: vehicle.plate,
+      inspectionExpiry: vehicle.inspectionExpiry,
+      insuranceExpiry: vehicle.insuranceExpiry,
+    })
+    .from(vehicle)
+    .where(and(eq(vehicle.id, row.vehicleId), eq(vehicle.tenantId, tenantId)));
+  if (!documents) return;
+  const block = vehicleComplianceBlock(
+    {
+      inspectionExpiry: documents.inspectionExpiry,
+      insuranceExpiry: documents.insuranceExpiry,
+    },
+    dateOnly(row.serviceDate),
+  );
+  if (!block) return;
+  throw conflict('vehicle_documents_expired', vehicleComplianceMessage(block, documents.plate));
 }
 
 async function assertTripReadyCrew(tx: Database, tenantId: string, row: TripRow): Promise<void> {
@@ -1806,35 +1918,40 @@ async function ensureDevice(tx: Database, tenantId: string, actor: TripActor): P
       .where(and(eq(device.id, deviceId), eq(device.tenantId, tenantId)));
     return;
   }
-  try {
-    await tx.insert(device).values({
+  // Yarış: iki istek aynı cihazı aynı anda bağlayabilir. Çakışmayı hataya
+  // düşürüp JS'te yakalamak transaction'ı iptal ederdi; bu yüzden veritabanına
+  // "çakışırsa hiçbir şey yapma" denir ve kazananın kim olduğu okunur.
+  const [inserted] = await tx
+    .insert(device)
+    .values({
       id: deviceId,
       tenantId,
       membershipId: actor.membershipId,
       platform: actor.platform,
       appVersion: actor.appVersion ?? undefined,
       lastSyncAt: new Date(),
-    });
-  } catch (error) {
-    if (!isUniqueViolation(error, 'device')) mapDbError(error);
-    const [raced] = await tx
-      .select({ membershipId: device.membershipId, revokedAt: device.revokedAt })
-      .from(device)
-      .where(and(eq(device.id, deviceId), eq(device.tenantId, tenantId)));
-    if (!raced) mapDbError(error);
-    if (raced.membershipId !== actor.membershipId) {
-      throw conflict('device_bound', 'Bu cihaz başka personele bağlı');
-    }
-    if (raced.revokedAt) throw forbidden('Bu cihaz iptal edilmiş');
-    await tx
-      .update(device)
-      .set({
-        lastSyncAt: new Date(),
-        appVersion: actor.appVersion,
-        platform: actor.platform,
-      })
-      .where(and(eq(device.id, deviceId), eq(device.tenantId, tenantId)));
+    })
+    .onConflictDoNothing()
+    .returning({ id: device.id });
+  if (inserted) return;
+
+  const [raced] = await tx
+    .select({ membershipId: device.membershipId, revokedAt: device.revokedAt })
+    .from(device)
+    .where(and(eq(device.id, deviceId), eq(device.tenantId, tenantId)));
+  if (!raced) throw conflict('device_bound', 'Bu cihaz kaydedilemedi');
+  if (raced.membershipId !== actor.membershipId) {
+    throw conflict('device_bound', 'Bu cihaz başka personele bağlı');
   }
+  if (raced.revokedAt) throw forbidden('Bu cihaz iptal edilmiş');
+  await tx
+    .update(device)
+    .set({
+      lastSyncAt: new Date(),
+      appVersion: actor.appVersion,
+      platform: actor.platform,
+    })
+    .where(and(eq(device.id, deviceId), eq(device.tenantId, tenantId)));
 }
 
 async function executeUndo(
@@ -1976,8 +2093,12 @@ async function deferUndo(
   tripId: string,
   input: UndoStudentCommandInput,
 ): Promise<CommandResult> {
-  try {
-    await tx.insert(pendingCommandDependency).values({
+  // Aynı komut iki kez ertelenebilir (istemci yeniden denemesi); ikincisi
+  // sessizce atlanır. Hata fırlatmak transaction'ı iptal eder ve hemen aşağıdaki
+  // makbuz yazımını da götürürdü.
+  await tx
+    .insert(pendingCommandDependency)
+    .values({
       tenantId,
       clientEventId: input.clientEventId,
       targetClientEventId: input.targetClientEventId,
@@ -1995,10 +2116,10 @@ async function deferUndo(
         occurredAtDevice: input.occurredAtDevice ?? null,
       },
       expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+    })
+    .onConflictDoNothing({
+      target: [pendingCommandDependency.tenantId, pendingCommandDependency.clientEventId],
     });
-  } catch (error) {
-    if (!isUniqueViolation(error, 'pending_command_dependency_pk')) throw error;
-  }
   const body: CommandResult = {
     replay: false,
     status: 'PENDING',
@@ -2139,6 +2260,20 @@ async function cancelQueuedStateNotifications(
   targetCommandId: string,
   undoCommandId: string,
 ): Promise<void> {
+  /**
+   * `claimed_at` dolu satır SAĞLAYICIYA GİTMİŞ OLABİLİR.
+   *
+   * Outbox üç evrelidir: claim (satır QUEUED kalır, yalnız `claimed_at` yazılır)
+   * → transaction'sız gönderim → settle. Eskiden iptal bütün QUEUED satırları
+   * kapsıyordu; claim ile settle arasına düşen bir geri alma, zaten Expo'ya
+   * gitmiş bildirimi "iptal edildi" sayıyor, "SENT var mı" sorusuna da hayır
+   * cevabı alıp DÜZELTME BİLDİRİMİNİ HİÇ KUYRUĞA ALMIYORDU. Veli "çocuğunuz
+   * bindi" mesajını alıyor ve düzeltmeyi hiç görmüyordu — 75 saniyelik
+   * bekletmenin var oluş sebebi tam olarak buydu (SPEC §6).
+   *
+   * Artık yalnız henüz üstlenilmemiş satır iptal edilir; üstlenilmiş satır
+   * settle'a bırakılır ve "gitmiş" sayılır.
+   */
   await tx
     .update(notification)
     .set({ status: 'CANCELLED' })
@@ -2147,6 +2282,7 @@ async function cancelQueuedStateNotifications(
         eq(notification.tenantId, tenantId),
         eq(notification.sourceCommandId, targetCommandId),
         eq(notification.status, 'QUEUED'),
+        isNull(notification.claimedAt),
       ),
     );
   const [sent] = await tx
@@ -2156,7 +2292,7 @@ async function cancelQueuedStateNotifications(
       and(
         eq(notification.tenantId, tenantId),
         eq(notification.sourceCommandId, targetCommandId),
-        eq(notification.status, 'SENT'),
+        or(eq(notification.status, 'SENT'), isNotNull(notification.claimedAt)),
       ),
     )
     .limit(1);

@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  check,
   date,
   foreignKey,
   index,
@@ -176,7 +177,13 @@ export const notification = pgTable(
     tenantId: uuid('tenant_id')
       .notNull()
       .references(() => tenant.id),
-    recipientMembershipId: uuid('recipient_membership_id').notNull(),
+    /** Üyeliğe adresli bildirim. Telefona adresliyse null olur. */
+    recipientMembershipId: uuid('recipient_membership_id'),
+    /**
+     * Sisteme kayıtlı olmayan alıcıya (örn. çocuğu bugün teyzesi alacak)
+     * gönderilen SMS. Üyelik ile bu alandan tam olarak biri dolu olur.
+     */
+    recipientPhone: text('recipient_phone'),
     channel: notificationChannelEnum('channel').notNull(),
     type: text('type').notNull(),
     tripId: uuid('trip_id'),
@@ -188,10 +195,17 @@ export const notification = pgTable(
     refId: uuid('ref_id'),
     dedupeKey: text('dedupe_key').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Outbox worker'ı satırı üstlendiğinde damgalanır; çöken worker'ın claim'i eskir. */
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
   },
   (t) => [
     unique('notification_dedupe').on(t.tenantId, t.dedupeKey),
+    check(
+      'notification_recipient_target',
+      sql`(${t.recipientMembershipId} is null) <> (${t.recipientPhone} is null)`,
+    ),
     index('notification_outbox_due_idx').on(t.tenantId, t.createdAt),
+    index('notification_claim_idx').on(t.tenantId, t.status, t.claimedAt),
     foreignKey({
       name: 'notification_recipient_fk',
       columns: [t.tenantId, t.recipientMembershipId],

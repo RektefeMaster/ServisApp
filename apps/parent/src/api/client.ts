@@ -13,13 +13,22 @@ import {
   type ParentHome,
   type ParentTrackingView,
 } from '@servisapp/contracts';
+import { appVersion } from '../app-version';
+import { envString } from '../env';
 
-const APP_VERSION = '0.0.0';
+/**
+ * Yayın derlemesinde `EXPO_PUBLIC_API_URL` gömülü değilse uygulama sessizce
+ * `127.0.0.1`'e bakıyordu: mağazadan inen sürüm hiçbir şey yapamadan "internet
+ * yok" diyordu ve sebebi görünmüyordu. Artık yerel adres yalnız geliştirmede
+ * kullanılır; eksik yapılandırma ilk istekte açık bir hata verir.
+ */
+function resolveBaseUrl(): string {
+  const configured = envString('EXPO_PUBLIC_API_URL');
+  if (configured) return configured.replace(/\/$/, '');
+  return __DEV__ ? 'http://127.0.0.1:3000' : '';
+}
 
-export const API_BASE_URL = (process.env['EXPO_PUBLIC_API_URL'] ?? 'http://127.0.0.1:3000').replace(
-  /\/$/,
-  '',
-);
+export const API_BASE_URL = resolveBaseUrl();
 
 export class ApiError extends Error {
   constructor(
@@ -40,15 +49,47 @@ export interface ParentSession {
 }
 
 export function apiUrl(path: string): string {
+  if (!API_BASE_URL) {
+    throw new ApiError(0, 'api_unconfigured', 'Uygulama sunucu adresi olmadan derlenmiş');
+  }
   return `${API_BASE_URL}${path}`;
 }
 
-function headers(session: ParentSession | null, extra?: Record<string, string>): Record<string, string> {
+/**
+ * Sunucuya giden jeton her istekte Auth istemcisinden tazelenir.
+ *
+ * Oturum açılırken kopyalanan access token React state'inde donuyordu; Supabase
+ * arka planda jetonu yenilese bile uygulama eskisini göndermeye devam ediyor,
+ * uzun açık kalan uygulamada 401'e düşüyordu. Auth istemcisi artık tek doğruluk
+ * kaynağı; okunamazsa saklı jetona düşülür (çevrimdışı hoşgörüsü).
+ */
+type AccessTokenProvider = () => Promise<string | null>;
+
+let accessTokenProvider: AccessTokenProvider | null = null;
+
+export function setAccessTokenProvider(provider: AccessTokenProvider | null): void {
+  accessTokenProvider = provider;
+}
+
+async function freshToken(session: ParentSession | null): Promise<string | null> {
+  if (!session) return null;
+  if (!accessTokenProvider) return session.token;
+  try {
+    return (await accessTokenProvider()) ?? session.token;
+  } catch {
+    return session.token;
+  }
+}
+
+function headers(
+  session: (ParentSession & { token: string }) | null,
+  extra?: Record<string, string>,
+): Record<string, string> {
   return {
     accept: 'application/json',
     'content-type': 'application/json',
     'x-client': 'parent',
-    'x-app-version': APP_VERSION,
+    'x-app-version': appVersion(),
     ...(session
       ? {
           authorization: `Bearer ${session.token}`,
@@ -73,6 +114,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Sunucudan gelen alan string değilse boş döner. `String(x)` kullanmak, nesne
+ * gelen bir alanı sessizce "[object Object]" metnine çevirip ekrana basardı.
+ */
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
 async function request(
   method: 'GET' | 'POST',
   path: string,
@@ -81,9 +130,10 @@ async function request(
 ): Promise<unknown> {
   let response: Response;
   try {
+    const token = await freshToken(session);
     response = await fetch(apiUrl(path), {
       method,
-      headers: headers(session),
+      headers: headers(session ? { ...session, token: token ?? session.token } : null),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -91,7 +141,8 @@ async function request(
   }
   const payload = await parseBody(response);
   if (!response.ok) {
-    const code = isRecord(payload) && typeof payload['error'] === 'string' ? payload['error'] : 'http_error';
+    const code =
+      isRecord(payload) && typeof payload['error'] === 'string' ? payload['error'] : 'http_error';
     const message =
       isRecord(payload) && typeof payload['message'] === 'string'
         ? payload['message']
@@ -107,6 +158,49 @@ export async function devParentLogin(phone: string, password: string): Promise<{
     throw new ApiError(500, 'invalid_login', 'Giriş yanıtı geçersiz');
   }
   return { token: payload['token'] };
+}
+
+export interface InvitePreview {
+  tenantName: string;
+  phoneHint: string;
+  status: 'PENDING' | 'USED' | 'EXPIRED' | 'REVOKED';
+}
+
+/** Davet önizlemesi açıktır: kimlik kanıtı değil, "hangi şirket, hangi numara" bilgisidir. */
+export async function fetchInvitePreview(token: string): Promise<InvitePreview> {
+  const payload = await request('GET', `/v1/invites/${encodeURIComponent(token)}`, null);
+  if (!isRecord(payload) || typeof payload['tenantName'] !== 'string') {
+    throw new ApiError(500, 'invalid_invite', 'Davet yanıtı geçersiz');
+  }
+  const status = asString(payload['status']);
+  return {
+    tenantName: payload['tenantName'],
+    phoneHint: asString(payload['phoneHint']),
+    status:
+      status === 'PENDING' || status === 'USED' || status === 'EXPIRED' || status === 'REVOKED'
+        ? status
+        : 'EXPIRED',
+  };
+}
+
+/**
+ * Daveti aktive eder. Jeton tek başına yetmez: sunucu, doğrulanmış telefonun
+ * davetteki numarayla aynı olmasını şart koşar.
+ */
+export async function activateInvite(
+  authToken: string,
+  token: string,
+): Promise<{ membershipId: string }> {
+  const payload = await request(
+    'POST',
+    '/v1/parent/invites/activate',
+    { token: authToken, tenantId: '', fullName: '', membershipId: '' },
+    { token },
+  );
+  if (!isRecord(payload) || typeof payload['membershipId'] !== 'string') {
+    throw new ApiError(500, 'invalid_invite', 'Aktivasyon yanıtı geçersiz');
+  }
+  return { membershipId: payload['membershipId'] };
 }
 
 export async function fetchSession(token: string): Promise<{
@@ -135,10 +229,10 @@ export async function fetchSession(token: string): Promise<{
   return {
     fullName: payload['fullName'],
     memberships: memberships.filter(isRecord).map((item) => ({
-      membershipId: String(item['membershipId'] ?? ''),
-      tenantId: String(item['tenantId'] ?? ''),
-      tenantName: String(item['tenantName'] ?? ''),
-      status: String(item['status'] ?? ''),
+      membershipId: asString(item['membershipId']),
+      tenantId: asString(item['tenantId']),
+      tenantName: asString(item['tenantName']),
+      status: asString(item['status']),
       roles: Array.isArray(item['roles'])
         ? item['roles'].filter(
             (role): role is 'ADMIN' | 'DRIVER' | 'ATTENDANT' | 'GUARDIAN' =>
@@ -185,7 +279,10 @@ export async function createRideException(
   return { items: payload['items'] };
 }
 
-export async function cancelRideException(session: ParentSession, exceptionId: string): Promise<void> {
+export async function cancelRideException(
+  session: ParentSession,
+  exceptionId: string,
+): Promise<void> {
   await request('POST', `/v1/parent/exceptions/${exceptionId}/cancel`, session);
 }
 
@@ -193,17 +290,22 @@ export async function createDeliveryOverride(
   session: ParentSession,
   input: CreateDeliveryOverrideInput,
 ): Promise<DeliveryOverrideView> {
-  return deliveryOverrideView.parse(await request('POST', '/v1/parent/delivery-overrides', session, input));
+  return deliveryOverrideView.parse(
+    await request('POST', '/v1/parent/delivery-overrides', session, input),
+  );
 }
 
-export async function cancelDeliveryOverride(session: ParentSession, overrideId: string): Promise<void> {
+export async function cancelDeliveryOverride(
+  session: ParentSession,
+  overrideId: string,
+): Promise<void> {
   await request('POST', `/v1/parent/delivery-overrides/${overrideId}/cancel`, session);
 }
 
 export async function resendDeliveryOtp(
   session: ParentSession,
   overrideId: string,
-): Promise<{ id: string; otpCode: string; addressText: string; resendCount: number }> {
+): Promise<{ id: string; otpSentTo: string; addressText: string; resendCount: number }> {
   const payload = await request(
     'POST',
     `/v1/parent/delivery-overrides/${overrideId}/resend`,
@@ -212,7 +314,7 @@ export async function resendDeliveryOtp(
   if (
     !isRecord(payload) ||
     typeof payload['id'] !== 'string' ||
-    typeof payload['otpCode'] !== 'string' ||
+    typeof payload['otpSentTo'] !== 'string' ||
     typeof payload['addressText'] !== 'string' ||
     typeof payload['resendCount'] !== 'number'
   ) {
@@ -220,7 +322,7 @@ export async function resendDeliveryOtp(
   }
   return {
     id: payload['id'],
-    otpCode: payload['otpCode'],
+    otpSentTo: payload['otpSentTo'],
     addressText: payload['addressText'],
     resendCount: payload['resendCount'],
   };
@@ -230,7 +332,9 @@ export async function createAddressChange(
   session: ParentSession,
   input: CreateAddressChangeInput,
 ): Promise<AddressChangeView> {
-  return addressChangeView.parse(await request('POST', '/v1/parent/address-changes', session, input));
+  return addressChangeView.parse(
+    await request('POST', '/v1/parent/address-changes', session, input),
+  );
 }
 
 export async function registerPushToken(

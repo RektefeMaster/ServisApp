@@ -20,7 +20,10 @@ import {
   type Database,
 } from '@servisapp/db';
 import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
-import { loadHorizonRouteVersions, pickApplicableRouteVersions } from './applicable-route-versions.js';
+import {
+  loadHorizonRouteVersions,
+  pickApplicableRouteVersions,
+} from './applicable-route-versions.js';
 
 export interface StudentPlanPair {
   morning: StudentPlanStatus;
@@ -132,18 +135,14 @@ export function planForStudent(
       studentSuspended: row.suspended,
       usesSegment: row.usesMorning,
       publishedAssignment: Boolean(morningHit),
-      stopHasCoordinates: morningHit
-        ? hasUsableCoordinates(morningHit.lat, morningHit.lng)
-        : false,
+      stopHasCoordinates: morningHit ? hasUsableCoordinates(morningHit.lat, morningHit.lng) : false,
     }),
     evening: segmentPlanStatus({
       studentEnded: ended,
       studentSuspended: row.suspended,
       usesSegment: row.usesEvening,
       publishedAssignment: Boolean(eveningHit),
-      stopHasCoordinates: eveningHit
-        ? hasUsableCoordinates(eveningHit.lat, eveningHit.lng)
-        : false,
+      stopHasCoordinates: eveningHit ? hasUsableCoordinates(eveningHit.lat, eveningHit.lng) : false,
     }),
     addressVerification: hasPinnedAddress ? 'PINNED' : 'PENDING',
   };
@@ -217,4 +216,37 @@ export async function loadParentChildren(
       eveningPlanStatus: plan.evening,
     };
   });
+}
+
+/**
+ * Tek öğrencinin segment planı.
+ *
+ * Çocuk ekranı bu değeri sormuyor, "Planlı" diye VARSAYIYORDU: yalnız akşam
+ * servisine kayıtlı çocuğun velisi ekranda "Sabah · Okula gidiş — Planlı"
+ * görüyor ve hiç gelmeyecek bir araç bekliyordu. Değer zaten hesaplanıyor
+ * (`segmentPlanStatus`), yalnız günlük plan yanıtında yoktu.
+ */
+export async function planPairForStudent(
+  tx: Database,
+  tenantId: string,
+  studentId: string,
+): Promise<StudentPlanPair | null> {
+  const [row] = await tx
+    .select({
+      enrollmentEnd: student.enrollmentEnd,
+      suspended: student.suspended,
+      usesMorning: student.usesMorning,
+      usesEvening: student.usesEvening,
+    })
+    .from(student)
+    .where(and(eq(student.id, studentId), eq(student.tenantId, tenantId)));
+  if (!row) return null;
+  const [tenantRow] = await tx
+    .select({ timezone: tenant.timezone })
+    .from(tenant)
+    .where(eq(tenant.id, tenantId));
+  const asOf = ymdInTimeZone(new Date(), tenantRow?.timezone ?? 'Europe/Istanbul');
+  const assignments = await loadAssignments(tx, tenantId, [studentId]);
+  const pinned = await loadPinnedUsages(tx, tenantId, [studentId]);
+  return planForStudent(row, assignments.get(studentId) ?? [], pinned.has(studentId), asOf);
 }

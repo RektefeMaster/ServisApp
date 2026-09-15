@@ -11,6 +11,7 @@ import {
   type ActorRole,
   type DeliveryTarget,
   type GpsSample,
+  type HandoverPolicy,
   type LastGoodFix,
   type LatLng,
   type LocationQuality,
@@ -52,6 +53,10 @@ export interface SimStudent {
   state: StudentState;
   deliveryTarget: DeliveryTarget;
   deliveryVerified: boolean;
+  /** Kapıda yetkili alıcı zorunlu mu (SPEC teslim politikası). */
+  handoverPolicy: HandoverPolicy;
+  /** GUARDIAN_REQUIRED tesliminde kapıdaki ACTIVE alıcı üyeliği; yoksa null. */
+  receiverMembershipId: string | null;
 }
 
 export interface SimWorld {
@@ -194,6 +199,8 @@ export function addTrip(
       state: 'EXPECTED',
       deliveryTarget: 'HOME',
       deliveryVerified: false,
+      handoverPolicy: 'GUARDIAN_REQUIRED',
+      receiverMembershipId: `${studentId}-g0`,
     });
   }
   appendEvent(world, 'TRIP_STARTED', id, null);
@@ -215,6 +222,8 @@ export function actStudent(
     actorRole,
     deliveryTarget: student.deliveryTarget,
     deliveryVerified: student.deliveryVerified,
+    handoverPolicy: student.handoverPolicy,
+    receiverMembershipId: student.receiverMembershipId,
   });
   if (!result.ok) return false;
   student.state = result.nextState;
@@ -378,6 +387,13 @@ export function worldInvariants(world: SimWorld): Record<string, boolean> {
       student.state === 'DELIVERED' &&
       !student.deliveryVerified,
   );
+  const guardianlessHandover = [...world.students.values()].some(
+    (student) =>
+      student.handoverPolicy === 'GUARDIAN_REQUIRED' &&
+      student.deliveryTarget !== 'SCHOOL' &&
+      (student.state === 'DELIVERED' || student.state === 'RETURNED_HOME') &&
+      !student.receiverMembershipId,
+  );
   const eventSeqs = world.events.map((row) => row.seq);
   const seqMonotone = eventSeqs.every((seq, index) => seq === index);
   const broadcastOk = !world.countsBroadcast || world.broadcasts === world.gpsAccepted;
@@ -386,6 +402,7 @@ export function worldInvariants(world: SimWorld): Record<string, boolean> {
     no_on_board_at_complete: !completedOnBoard,
     unique_student_rows: uniqueStudents,
     no_unverified_temp_delivery: !unverifiedTemp,
+    no_guardianless_handover: !guardianlessHandover,
     event_append_only: seqMonotone,
     broadcast_not_times_parents: broadcastOk && parentFanout,
   };

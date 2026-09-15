@@ -1,5 +1,5 @@
 import { route, routeVersion, type Database } from '@servisapp/db';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 
 export interface HorizonRouteVersion {
   routeId: string;
@@ -10,6 +10,7 @@ export interface HorizonRouteVersion {
   versionNo: number;
   effectiveFrom: string | Date;
   maxDetourM: number;
+  departureLocalTime: string;
 }
 
 function ymdOf(value: string | Date): string {
@@ -35,6 +36,7 @@ export async function loadHorizonRouteVersions(
       versionNo: routeVersion.versionNo,
       effectiveFrom: routeVersion.effectiveFrom,
       maxDetourM: route.maxDetourM,
+      departureLocalTime: route.departureLocalTime,
     })
     .from(routeVersion)
     .innerJoin(route, and(eq(route.id, routeVersion.routeId), eq(route.tenantId, tenantId)))
@@ -42,6 +44,8 @@ export async function loadHorizonRouteVersions(
       and(
         eq(routeVersion.tenantId, tenantId),
         inArray(routeVersion.status, ['PUBLISHED', 'ARCHIVED']),
+        // Emekli güzergâh yeni sefer üretmez.
+        isNull(route.retiredAt),
       ),
     );
 }

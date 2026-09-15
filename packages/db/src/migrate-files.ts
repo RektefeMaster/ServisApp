@@ -7,6 +7,39 @@ export function migrationsDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '../migrations');
 }
 
+export interface MigrationDrift {
+  /** Dosyada olup deftere hiç girmemiş migration'lar, sırayla. */
+  pending: string[];
+  /** Defterde olup dosyası bulunmayanlar: silinmiş ya da yeniden adlandırılmış. */
+  unknown: string[];
+}
+
+/**
+ * Dosya listesi ile defteri karşılaştırır. Veritabanı gerektirmez; kayma
+ * mantığı burada olduğu için testten geçirilebilir.
+ */
+export function diffMigrations(
+  files: readonly string[],
+  applied: readonly string[],
+): MigrationDrift {
+  const appliedSet = new Set(applied);
+  const fileSet = new Set(files);
+  return {
+    pending: files.filter((name) => !appliedSet.has(name)),
+    unknown: applied.filter((name) => !fileSet.has(name)),
+  };
+}
+
+/**
+ * Tüm koşuyu kapsayan tavsiye kilidi.
+ *
+ * Fly `release_command`'i birden fazla makinede paralel tetikleyebilir; defter
+ * kaydı transaction'ın sonunda yazıldığı için iki koşu aynı dosyayı aynı anda
+ * seçip `create type` / `create policy` üzerinde çakışıyordu. Kilit bağlantı
+ * kapanınca kendiliğinden bırakılır.
+ */
+const MIGRATION_LOCK_KEY = '8142539071004211';
+
 /** SQL dosyalarını sırayla, bir kez uygular. İkinci çalıştırma no-op olmalıdır. */
 export async function applyMigrations(url: string): Promise<void> {
   const dir = migrationsDir();
@@ -15,6 +48,7 @@ export async function applyMigrations(url: string): Promise<void> {
 
   const sql = postgres(url, { max: 1, onnotice: () => {} });
   try {
+    await sql`select pg_advisory_lock(${MIGRATION_LOCK_KEY}::bigint)`;
     await sql`
       create table if not exists schema_migrations (
         filename text primary key,

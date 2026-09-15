@@ -39,6 +39,9 @@ import {
   gpsWatchdog,
   occupancyForSegment,
   pickStudentAnchorStop,
+  vehicleComplianceBlock,
+  vehicleComplianceMessage,
+  vehicleComplianceWarnings,
   reconcileStudent,
   tripReadyCrewBlock,
   ymdInTimeZone,
@@ -492,8 +495,19 @@ export function createOperationsPort(db: Database) {
               eq(tenantMembership.tenantId, tenantId),
             ),
           );
-        if (!member || member.status !== 'ACTIVE') {
-          throw notFound('Personel bulunamadı');
+        if (!member) throw notFound('Personel bulunamadı');
+        if (member.status !== 'ACTIVE') {
+          /**
+           * Üyelik ilk girişte ACTIVE olur. Yeni işe alınan personel henüz
+           * uygulamayı açmadıysa sefere atanamaz — doğrusu budur, aksi halde
+           * sefer, işletemeyecek bir kişiyle "hazır" görünür. Ama mesaj
+           * "Personel bulunamadı" diyordu: sevkiyatçı listede gördüğü kişinin
+           * neden atanamadığını anlamıyor, kaydı yanlış girdiğini sanıyordu.
+           */
+          throw conflict(
+            'staff_not_activated',
+            'Bu personel uygulamaya henüz giriş yapmadı; giriş yaptıktan sonra sefere atanabilir',
+          );
         }
         const [hasRole] = await tx
           .select({ role: membershipRole.role })
@@ -859,6 +873,8 @@ export function createOperationsPort(db: Database) {
             actualStartedAt: trip.actualStartedAt,
             vehicleId: trip.currentVehicleId,
             epoch: trip.locationSessionEpoch,
+            driverId: trip.currentDriverMembershipId,
+            attendantId: trip.currentAttendantMembershipId,
           })
           .from(trip)
           .innerJoin(
@@ -925,6 +941,7 @@ export function createOperationsPort(db: Database) {
               id: criticalChangeAlert.id,
               tripId: criticalChangeAlert.tripId,
               body: criticalChangeAlert.body,
+              requiresAckRoles: criticalChangeAlert.requiresAckRoles,
             })
             .from(criticalChangeAlert)
             .where(
@@ -938,7 +955,10 @@ export function createOperationsPort(db: Database) {
             alertIds.length === 0
               ? []
               : await tx
-                  .select({ alertId: criticalChangeAck.alertId })
+                  .select({
+                    alertId: criticalChangeAck.alertId,
+                    membershipId: criticalChangeAck.membershipId,
+                  })
                   .from(criticalChangeAck)
                   .where(
                     and(
@@ -946,9 +966,29 @@ export function createOperationsPort(db: Database) {
                       inArray(criticalChangeAck.alertId, alertIds),
                     ),
                   );
-          const acked = new Set(acks.map((row) => row.alertId));
+          // Kritik uyarı, ONU görmesi gereken HERKES okuyana kadar açıktır.
+          // Tek bir ACK'i "sorun kalmadı" saymak, şoför okuyunca hostesin
+          // uygulamasının hâlâ bloklu olduğu bir paneli sessizce temiz gösterirdi.
+          const ackedBy = new Map<string, Set<string>>();
+          for (const row of acks) {
+            const set = ackedBy.get(row.alertId) ?? new Set<string>();
+            set.add(row.membershipId);
+            ackedBy.set(row.alertId, set);
+          }
+          const crewByTrip = new Map(
+            trips.map((row) => [row.id, { DRIVER: row.driverId, ATTENDANT: row.attendantId }]),
+          );
           for (const alert of alerts) {
-            if (acked.has(alert.id)) continue;
+            const done = ackedBy.get(alert.id) ?? new Set<string>();
+            const crew = crewByTrip.get(alert.tripId);
+            const required = (alert.requiresAckRoles ?? [])
+              .map((role) => (role === 'DRIVER' ? crew?.DRIVER : crew?.ATTENDANT))
+              .filter((membershipId): membershipId is string => Boolean(membershipId));
+            const resolved =
+              required.length > 0
+                ? required.every((membershipId) => done.has(membershipId))
+                : done.size > 0;
+            if (resolved) continue;
             items.push({
               kind: 'CRITICAL_UNACKED',
               severity: 'CRITICAL',
@@ -956,6 +996,50 @@ export function createOperationsPort(db: Database) {
               plate: plateByTrip.get(alert.tripId) ?? null,
               body: alert.body,
             });
+          }
+
+          const documents = await tx
+            .select({
+              tripId: trip.id,
+              plate: vehicle.plate,
+              inspectionExpiry: vehicle.inspectionExpiry,
+              insuranceExpiry: vehicle.insuranceExpiry,
+            })
+            .from(trip)
+            .innerJoin(
+              vehicle,
+              and(eq(vehicle.id, trip.currentVehicleId), eq(vehicle.tenantId, tenantId)),
+            )
+            .where(and(eq(trip.tenantId, tenantId), inArray(trip.id, tripIds)));
+          const documentSeen = new Set<string>();
+          for (const row of documents) {
+            const docs = {
+              inspectionExpiry: row.inspectionExpiry,
+              insuranceExpiry: row.insuranceExpiry,
+            };
+            const block = vehicleComplianceBlock(docs, date);
+            if (block) {
+              items.push({
+                kind: 'VEHICLE_DOCUMENT',
+                severity: 'CRITICAL',
+                tripId: row.tripId,
+                plate: row.plate,
+                body: vehicleComplianceMessage(block, row.plate),
+              });
+              continue;
+            }
+            for (const warning of vehicleComplianceWarnings(docs, date)) {
+              const key = `${row.plate}:${warning}`;
+              if (documentSeen.has(key)) continue;
+              documentSeen.add(key);
+              items.push({
+                kind: 'VEHICLE_DOCUMENT',
+                severity: 'WARNING',
+                tripId: row.tripId,
+                plate: row.plate,
+                body: vehicleComplianceMessage(warning, row.plate),
+              });
+            }
           }
 
           const flagged = await tx
@@ -1024,14 +1108,17 @@ export function createOperationsPort(db: Database) {
           switch (kind) {
             case 'GPS_STALE':
               return 0;
-            case 'OTP_LOCKED':
+            // Evrakı geçmiş araç seferi hiç başlatamaz; yönetici bunu erken görmeli.
+            case 'VEHICLE_DOCUMENT':
               return 1;
-            case 'CRITICAL_UNACKED':
+            case 'OTP_LOCKED':
               return 2;
-            case 'OVERRIDE_PENDING':
+            case 'CRITICAL_UNACKED':
               return 3;
-            case 'NEEDS_REVIEW':
+            case 'OVERRIDE_PENDING':
               return 4;
+            case 'NEEDS_REVIEW':
+              return 5;
             default: {
               const unexpected: never = kind;
               return unexpected;
@@ -1080,6 +1167,7 @@ async function insertMovedInStudent(
       lat: tripStop.snapshotLat,
       lng: tripStop.snapshotLng,
       text: tripStop.snapshotAddressText,
+      arrivedAt: tripStop.actualArrivedAt,
     })
     .from(tripStop)
     .where(and(eq(tripStop.tripId, input.tripId), eq(tripStop.tenantId, input.tenantId)))
@@ -1092,8 +1180,19 @@ async function insertMovedInStudent(
     input.segment,
   );
   if (!home) throw conflict('student_address_missing', 'Öğrencinin bu sefer için adresi yok');
+  // Araç yoldaysa geçilmiş durak aday olamaz: çocuğu şoförün arkada bıraktığı
+  // kapıda bekletmek, transferin kendisinden daha kötü bir hatadır.
+  const lastArrivedSeq = stops.reduce<number | null>(
+    (acc, row) =>
+      row.arrivedAt ? Math.max(acc ?? Number.NEGATIVE_INFINITY, Number(row.seq)) : acc,
+    null,
+  );
+  const reachable =
+    dest.state === 'ACTIVE' && lastArrivedSeq !== null
+      ? stops.filter((row) => !row.arrivedAt && Number(row.seq) > lastArrivedSeq)
+      : stops;
   const anchor = pickStudentAnchorStop(
-    stops.map((row) => ({
+    reachable.map((row) => ({
       id: row.id,
       kind: row.kind,
       lat: row.lat,
@@ -1104,10 +1203,13 @@ async function insertMovedInStudent(
     input.segment,
   );
   if (!anchor) {
-    throw conflict(
-      'stop_not_on_route',
-      'Öğrencinin adresi hedef rotadaki bir durakla eşleşmiyor',
-    );
+    if (reachable.length < stops.length) {
+      throw conflict(
+        'stop_already_passed',
+        'Hedef sefer öğrencinin durağını geçti; bu sefere otomatik transfer edilemez',
+      );
+    }
+    throw conflict('stop_not_on_route', 'Öğrencinin adresi hedef rotadaki bir durakla eşleşmiyor');
   }
   const schoolStop = stops.find((row) => row.kind === 'SCHOOL');
 

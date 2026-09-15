@@ -1,3 +1,6 @@
+// Yan etkili: zod'un varsayılan hata mesajlarını Türkçeye çeker (bkz. locale.ts).
+import './locale.js';
+
 export * from './exceptions.js';
 export * from './onboarding.js';
 export * from './primitives.js';

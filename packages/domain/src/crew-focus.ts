@@ -3,6 +3,7 @@ import type { StopKind } from './route-plan.js';
 import { applyStudentAction, type StudentAction } from './student-state-machine.js';
 import {
   blocksCompletion,
+  isOperationalFact,
   occupiesVehicle,
   type ActorRole,
   type DeliveryTarget,
@@ -60,6 +61,33 @@ export type TripGate =
   | { kind: 'OPERATE' }
   | { kind: 'DONE' };
 
+/**
+ * Seferi kapatmayı engelleyen öğrenciler ve sebepleri.
+ *
+ * `tripGate` yalnız "OPERATE" diyordu; "Teslim edilemedi" durumundaki çocuk ise
+ * hiçbir durakta işaretlenebilir olmadığı için ekranda görünmüyordu. Şoför
+ * "Bu durakta işaretlenecek öğrenci kalmadı" yazısıyla kilitli bir seferde
+ * kalıyor, neyin engellediğini asla öğrenemiyordu.
+ */
+export interface CompletionBlocker {
+  id: string;
+  fullName: string;
+  state: StudentState;
+  /** Şoförün kendi çözebileceği bir durum mu, yoksa yönetici mi gerekiyor. */
+  needsAdmin: boolean;
+}
+
+export function completionBlockers(trip: CrewTripView): CompletionBlocker[] {
+  return trip.students
+    .filter((student) => blocksCompletion(student.state))
+    .map((student) => ({
+      id: student.id,
+      fullName: student.fullName,
+      state: student.state,
+      needsAdmin: student.state === 'DELIVERY_FAILED',
+    }));
+}
+
 export function tripGate(trip: CrewTripView): TripGate {
   switch (trip.state) {
     case 'PLANNED':
@@ -111,7 +139,33 @@ export function tripFocus(trip: CrewTripView): TripFocus {
 
 export function pendingStudentsAtStop(trip: CrewTripView, stop: CrewStop): CrewStudent[] {
   const pending = trip.students.filter((student) => studentWorksAtStop(trip, stop, student));
-  return [...pending].sort((left, right) => left.fullName.localeCompare(right.fullName, 'tr'));
+  const order = new Map(stop.studentIds.map((id, index) => [id, index]));
+  return [...pending].sort((left, right) => {
+    const leftRank = order.get(left.studentId) ?? Number.MAX_SAFE_INTEGER;
+    const rightRank = order.get(right.studentId) ?? Number.MAX_SAFE_INTEGER;
+    return leftRank - rightRank;
+  });
+}
+
+/**
+ * Bu kapının sayacı: kaç öğrenci işlendi / bu kapıda kaç öğrenci var.
+ *
+ * Ekran bu sayıyı durak ÜYELİĞİNDEN türetiyordu (`expectedStopId` ya da
+ * `stop.studentIds`). Akşam seferinde öğrenciler kendi İNİŞ duraklarına
+ * bağlıdır; okul kapısında hiçbirinin üyeliği yoktur. Sonuç: şoför okulda iki
+ * çocuğu bindirirken ekran "Bu kapıda 0/0" yazıyordu ve her binişte de 0/0
+ * kalıyordu — günün en kalabalık kapısında ilerleme geri bildirimi YOKTU.
+ *
+ * Doğru küme, kapının gerçekten işlediği öğrencilerdir: bekleyenler + işlemi
+ * burada bitmiş olanlar. Bugün binmeyecek çocuk hiçbir kapıda sayılmaz.
+ */
+export function stopWorkload(trip: CrewTripView, stop: CrewStop): { done: number; total: number } {
+  const cohort = trip.students.filter((student) => {
+    if (skipsTrip(student.state)) return false;
+    return studentWorksAtStop(trip, stop, student) || studentSettledAtStop(trip, stop, student);
+  });
+  const pending = cohort.filter((student) => studentWorksAtStop(trip, stop, student)).length;
+  return { done: cohort.length - pending, total: cohort.length };
 }
 
 export function crewActionsForStudent(
@@ -155,9 +209,45 @@ export function resumeOpenTrip(
   return last ? { id: last.id, reason: 'LAST_OPEN' } : null;
 }
 
+/** Bugün hiç binmeyecek: hiçbir kapıda işlem beklemiyor, sayaca da girmez. */
+function skipsTrip(state: StudentState): boolean {
+  return state === 'ABSENT_PLANNED' || state === 'MOVED_OUT';
+}
+
+/** Bu kapının işi bu öğrenci için BİTTİ mi (bekleyenlerin tersi). */
+function studentSettledAtStop(trip: CrewTripView, stop: CrewStop, student: CrewStudent): boolean {
+  const atStop = student.expectedStopId === stop.id || stop.studentIds.includes(student.studentId);
+  switch (stop.kind) {
+    // Kapıda işlem gördü: bindi ya da "durakta yoktu" işaretlendi.
+    case 'PICKUP':
+      return atStop && student.state !== 'EXPECTED';
+    // İniş kapısı yalnız araca binmiş çocuğu işler; hiç binmemiş çocuk bu
+    // kapının işi değildir (sefer sonu engelleri onu ayrıca gösterir).
+    case 'DROPOFF':
+      return atStop && isOperationalFact(student.state) && student.state !== 'ON_BOARD';
+    case 'SCHOOL':
+      switch (trip.segment) {
+        // Sabah okulda yalnız araca binmiş olanlar iner; durakta yok yazılan
+        // çocuk bu kapıdan hiç geçmez.
+        case 'MORNING':
+          return isOperationalFact(student.state) && student.state !== 'ON_BOARD';
+        // Akşam okul kapısı bütün listeyi işler: herkes burada biner.
+        case 'AFTERNOON':
+          return student.state !== 'EXPECTED';
+        default: {
+          const unexpected: never = trip.segment;
+          return exhaustive(unexpected, 'studentSettledAtStop.segment');
+        }
+      }
+    default: {
+      const unexpected: never = stop.kind;
+      return exhaustive(unexpected, 'studentSettledAtStop');
+    }
+  }
+}
+
 function studentWorksAtStop(trip: CrewTripView, stop: CrewStop, student: CrewStudent): boolean {
-  const atStop =
-    student.expectedStopId === stop.id || stop.studentIds.includes(student.studentId);
+  const atStop = student.expectedStopId === stop.id || stop.studentIds.includes(student.studentId);
   switch (stop.kind) {
     case 'PICKUP':
       return atStop && student.state === 'EXPECTED';

@@ -101,9 +101,10 @@ describe('evaluateGpsQuality', () => {
       speedMps: 5,
       recordedAtMs: now,
     };
-    expect(
-      evaluateGpsQuality({ nowMs: now, sample: jumped, lastGood: last }),
-    ).toMatchObject({ quality: 'REJECTED', reason: 'JUMP' });
+    expect(evaluateGpsQuality({ nowMs: now, sample: jumped, lastGood: last })).toMatchObject({
+      quality: 'REJECTED',
+      reason: 'JUMP',
+    });
   });
 
   it('10 dakikada 500 m ilerlemeyi kabul eder', () => {

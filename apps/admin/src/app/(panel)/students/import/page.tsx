@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/session';
+import { importRowStatusLabel } from '@/lib/labels';
 
 interface ImportBatch {
   id: string;
@@ -13,7 +14,12 @@ interface ImportBatch {
     uniqueGuardianPhones: number;
     committed: number;
   };
-  rows: Array<{ rowNo: number; status: string; errorCode: string | null; studentFullName: string | null }>;
+  rows: Array<{
+    rowNo: number;
+    status: string;
+    errorCode: string | null;
+    studentFullName: string | null;
+  }>;
 }
 
 interface School {
@@ -36,7 +42,9 @@ export default function ImportPage() {
         setSchools(body.items);
         setSchoolId(body.items[0]?.id ?? '');
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : 'Okullar okunamadı'));
+      .catch((caught: unknown) =>
+        setError(caught instanceof Error ? caught.message : 'Okullar okunamadı'),
+      );
   }, []);
 
   function rowsFromText() {
@@ -45,7 +53,9 @@ export default function ImportPage() {
       .map((line) => line.trim())
       .filter((line, index) => line.length > 0 && index > 0);
     return lines.map((line, index) => {
-      const [studentFullName, guardianFullName, guardianPhone] = line.split(';').map((part) => part.trim());
+      const [studentFullName, guardianFullName, guardianPhone] = line
+        .split(';')
+        .map((part) => part.trim());
       return {
         rowNo: index + 1,
         studentFullName,
@@ -88,7 +98,9 @@ export default function ImportPage() {
   return (
     <div>
       <h1 className="font-serif text-2xl">İçe aktarma</h1>
-      <p className="mt-1 text-sm text-muted">31 öğrenci = 31 SMS değildir. Benzersiz telefon kadar davet gider.</p>
+      <p className="mt-1 text-sm text-muted">
+        31 öğrenci = 31 SMS değildir. Benzersiz telefon kadar davet gider.
+      </p>
       <textarea
         className="mt-4 h-40 w-full rounded border border-rule bg-white p-3 font-mono text-sm"
         value={text}
@@ -96,7 +108,7 @@ export default function ImportPage() {
       />
       <div className="mt-3 flex gap-2">
         <select
-          className="rounded border border-rule bg-white px-2 py-1 text-sm"
+          className="rounded border border-field bg-white px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
           value={schoolId}
           onChange={(event) => setSchoolId(event.target.value)}
         >
@@ -106,7 +118,11 @@ export default function ImportPage() {
             </option>
           ))}
         </select>
-        <button type="button" className="rounded bg-ink px-3 py-1 text-sm text-paper" onClick={() => void preview()}>
+        <button
+          type="button"
+          className="rounded bg-ink px-3 py-1 text-sm text-paper"
+          onClick={() => void preview()}
+        >
           Önizle
         </button>
       </div>
@@ -122,8 +138,8 @@ export default function ImportPage() {
             {batch.summary.addressUnverified} adres doğrulanmalı
           </p>
           <p className="mt-4 text-sm text-muted">
-            Sonraki adım: {batch.summary.uniqueGuardianPhones} benzersiz telefon → {batch.summary.uniqueGuardianPhones}{' '}
-            davet
+            Sonraki adım: {batch.summary.uniqueGuardianPhones} benzersiz telefon →{' '}
+            {batch.summary.uniqueGuardianPhones} davet
           </p>
           <button
             type="button"
@@ -135,7 +151,7 @@ export default function ImportPage() {
           <ul className="mt-4 text-sm">
             {batch.rows.map((row) => (
               <li key={row.rowNo}>
-                {row.rowNo}. {row.studentFullName ?? '—'} · {row.status}
+                {row.rowNo}. {row.studentFullName ?? '—'} · {importRowStatusLabel(row.status)}
                 {row.errorCode ? ` (${row.errorCode})` : ''}
               </li>
             ))}

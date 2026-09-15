@@ -1,6 +1,9 @@
 export const TRIP_HORIZON_DAYS = 7;
+/** Rota kendi kalkış saatini taşımıyorsa düşülen varsayılan (yalnız geriye dönük veri). */
 export const MORNING_DEPARTURE_HOUR = 7;
 export const AFTERNOON_DEPARTURE_HOUR = 16;
+
+const LOCAL_TIME_PATTERN = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
 
 export type HorizonSegment = 'MORNING' | 'AFTERNOON';
 
@@ -41,13 +44,34 @@ function addDaysYmd(ymd: string, days: number): string {
   return next;
 }
 
+/**
+ * Bir servis şirketinde her rota aynı dakikada çıkmaz: ikinci vardiya 06:30,
+ * uzak mahalle 07:10 kalkar. Kalkış saati rotanın kendi alanıdır; segment
+ * varsayılanı yalnız alan doldurulmamışsa devreye girer.
+ */
+export function defaultDepartureLocalTime(segment: HorizonSegment): string {
+  const hour = segment === 'MORNING' ? MORNING_DEPARTURE_HOUR : AFTERNOON_DEPARTURE_HOUR;
+  return `${String(hour).padStart(2, '0')}:00`;
+}
+
+/** "07:00" / "07:00:00" → "07:00". Geçersiz değerde segment varsayılanına düşer. */
+export function normalizeDepartureLocalTime(
+  value: string | null | undefined,
+  segment: HorizonSegment,
+): string {
+  const trimmed = (value ?? '').trim().slice(0, 5);
+  return LOCAL_TIME_PATTERN.test(trimmed) ? trimmed : defaultDepartureLocalTime(segment);
+}
+
 export function plannedDepartureAt(
   serviceDate: string,
   segment: HorizonSegment,
   timeZone: string,
+  departureLocalTime?: string | null,
 ): Date {
-  const hour = segment === 'MORNING' ? MORNING_DEPARTURE_HOUR : AFTERNOON_DEPARTURE_HOUR;
-  return instantFromZonedLocal(serviceDate, hour, 0, timeZone);
+  const local = normalizeDepartureLocalTime(departureLocalTime, segment);
+  const [hour, minute] = local.split(':');
+  return instantFromZonedLocal(serviceDate, Number(hour), Number(minute), timeZone);
 }
 
 export function deliveryTargetForSegment(segment: HorizonSegment): 'SCHOOL' | 'HOME' {
