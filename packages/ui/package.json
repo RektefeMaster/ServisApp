@@ -22,8 +22,8 @@
     "react-native": "0.86.3"
   },
   "devDependencies": {
-    "@types/react": "19.2.2",
-    "expo-haptics": "~15.0.8",
+    "@types/react": "19.2.7",
+    "expo-haptics": "57.0.3",
     "react": "19.2.3",
     "react-native": "0.86.3",
     "typescript": "6.0.3"

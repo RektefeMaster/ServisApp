@@ -6,11 +6,11 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 let client: SupabaseClient | null = null;
 
 function url(): string | undefined {
-  return process.env['NEXT_PUBLIC_SUPABASE_URL'];
+  return process.env.NEXT_PUBLIC_SUPABASE_URL;
 }
 
 function publishableKey(): string | undefined {
-  return process.env['NEXT_PUBLIC_SUPABASE_ANON_KEY'];
+  return process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 }
 
 export function authConfigured(): boolean {
@@ -51,5 +51,5 @@ export async function signInWithPassword(email: string, password: string): Promi
 
 export async function signOutAuth(): Promise<void> {
   if (!authConfigured()) return;
-  await createAuthClient().auth.signOut();
+  await createAuthClient().auth.signOut({ scope: 'local' });
 }

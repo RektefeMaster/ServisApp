@@ -50,40 +50,49 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6">
-      <p className="font-serif text-3xl">ServisApp</p>
-      <p className="mt-2 text-sm text-muted">
-        Saha masası — kayıt admin’de, veli yalnız aktive olur.
-      </p>
-      <form onSubmit={(event) => void submit(event)} className="mt-8 flex flex-col gap-3">
-        <label className="text-sm">
-          E-posta
-          <input
-            className="mt-1 w-full rounded border border-rule bg-white px-3 py-2"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            autoComplete="username"
-          />
-        </label>
-        <label className="text-sm">
-          Parola
-          <input
-            type="password"
-            className="mt-1 w-full rounded border border-rule bg-white px-3 py-2"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
-          />
-        </label>
-        {error ? <p className="text-sm text-red-700">{error}</p> : null}
-        <button
-          type="submit"
-          disabled={busy}
-          className="mt-2 rounded bg-ink px-4 py-2 text-sm text-paper disabled:opacity-50"
-        >
-          {busy ? 'Giriliyor…' : 'Giriş'}
-        </button>
-      </form>
+    <main className="mx-auto flex min-h-screen max-w-lg flex-col justify-center px-5 py-10">
+      <div className="rounded-3xl border border-rule bg-white p-7 shadow-lg shadow-[#253a38]/5 sm:p-10">
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted">
+          Operasyon merkezi
+        </p>
+        <h1 className="mt-3 font-serif text-4xl tracking-tight">ServisApp</h1>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          Seferleri, öğrencileri ve saha kararlarını tek yerden yönetin.
+        </p>
+        <form onSubmit={(event) => void submit(event)} className="mt-8 flex flex-col gap-4">
+          <label className="text-sm">
+            E-posta
+            <input
+              className="mt-1 min-h-11 w-full rounded-lg border border-field bg-white px-3 py-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="username"
+            />
+          </label>
+          <label className="text-sm">
+            Parola
+            <input
+              type="password"
+              className="mt-1 min-h-11 w-full rounded-lg border border-field bg-white px-3 py-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete="current-password"
+            />
+          </label>
+          {error ? (
+            <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+              {error}
+            </p>
+          ) : null}
+          <button
+            type="submit"
+            disabled={busy}
+            className="mt-2 min-h-11 rounded-lg bg-ink px-4 py-2 text-sm font-medium text-paper transition-colors hover:bg-[#33524d] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:opacity-50"
+          >
+            {busy ? 'Giriliyor…' : 'Giriş'}
+          </button>
+        </form>
+      </div>
     </main>
   );
 }

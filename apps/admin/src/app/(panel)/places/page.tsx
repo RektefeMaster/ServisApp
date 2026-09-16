@@ -74,6 +74,7 @@ export default function PlacesPage() {
   }, [reload]);
 
   function coords(rawLat: string, rawLng: string): { lat: number; lng: number } | null {
+    if (!rawLat.trim() || !rawLng.trim()) return null;
     const parsedLat = Number(rawLat.trim());
     const parsedLng = Number(rawLng.trim());
     if (!Number.isFinite(parsedLat) || parsedLat < -90 || parsedLat > 90) return null;
@@ -82,8 +83,14 @@ export default function PlacesPage() {
   }
 
   async function pinAddress() {
+    if (text.trim().length < 3 || il.trim().length < 2 || ilce.trim().length < 2) {
+      setOk(null);
+      setError('Açık adresi, ili ve ilçeyi eksiksiz girin.');
+      return;
+    }
     const point = coords(lat, lng);
     if (!point) {
+      setOk(null);
       setError('Enlem/boylam geçersiz. Harita uygulamasından kopyalayın.');
       return;
     }
@@ -109,12 +116,19 @@ export default function PlacesPage() {
   }
 
   async function createStop() {
+    if (stopLabel.trim().length < 2) {
+      setOk(null);
+      setError('Durak adını en az 2 karakter olarak girin.');
+      return;
+    }
     const point = coords(stopLat, stopLng);
     if (!point) {
+      setOk(null);
       setError('Durak enlem/boylamı geçersiz.');
       return;
     }
     if (!stopAddressId) {
+      setOk(null);
       setError('Önce durağın bağlı olduğu adresi seçin.');
       return;
     }

@@ -96,6 +96,8 @@ const SEGMENT: Record<string, string> = {
  * yerine ham kod kalır, çünkü operatör ham kodu arama kutusuna yapıştırır.
  */
 const EVENT_TYPE: Record<string, string> = {
+  TRIP_GENERATED: 'Sefer planlandı',
+  TRIP_REBUILT: 'Sefer planı yenilendi',
   TRIP_READY: 'Sefer hazır',
   TRIP_STARTED: 'Sefer başladı',
   TRIP_COMPLETED: 'Sefer tamamlandı',
@@ -110,6 +112,21 @@ const EVENT_TYPE: Record<string, string> = {
   DELIVERY_ADMIN_OVERRIDE: 'Yönetici teslim onayı',
   TRIP_VEHICLE_CHANGED: 'Sefer aracı değişti',
   TRIP_CREW_CHANGED: 'Sefer personeli değişti',
+  VEHICLE_ASSIGNED: 'Araç atandı',
+  CREW_ASSIGNED: 'Personel atandı',
+  PLAN_ABSENT: 'Devamsızlık planlandı',
+  PLAN_TEMP_DELIVERY: 'Farklı teslimat planlandı',
+  PLAN_MOVED_IN: 'Öğrenci sefere alındı',
+  PLAN_MOVED_OUT: 'Öğrenci seferden çıkarıldı',
+  PLAN_CHANGE_BLOCKED: 'Plan değişikliği engellendi',
+};
+
+const ACTOR_ROLE: Record<string, string> = {
+  SYSTEM: 'Sistem',
+  ADMIN: 'Yönetici',
+  DRIVER: 'Şoför',
+  ATTENDANT: 'Hostes',
+  GUARDIAN: 'Veli',
 };
 
 function lookup(table: Record<string, string>, value: string | null | undefined): string {
@@ -121,6 +138,8 @@ export const tripStateLabel = (value: string | null | undefined): string =>
   lookup(TRIP_STATE, value);
 export const studentStateLabel = (value: string | null | undefined): string =>
   lookup(STUDENT_STATE, value);
+export const actorRoleLabel = (value: string | null | undefined): string =>
+  lookup(ACTOR_ROLE, value);
 export const planStatusLabel = (value: string | null | undefined): string =>
   lookup(PLAN_STATUS, value);
 export const overrideStatusLabel = (value: string | null | undefined): string =>

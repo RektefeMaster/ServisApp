@@ -48,7 +48,15 @@ async function proxy(
   }
   const tenantId = store.get(ADMIN_TENANT_COOKIE)?.value;
   const search = new URL(request.url).search;
-  const target = apiUrl(`/v1/${path.join('/')}${search}`);
+  let target: string;
+  try {
+    target = apiUrl(`/v1/${path.join('/')}${search}`);
+  } catch {
+    return NextResponse.json(
+      { error: 'api_unconfigured', message: 'Panel sunucu adresi ayarlanmamış' },
+      { status: 503 },
+    );
+  }
   const headers = new Headers();
   request.headers.forEach((value, key) => {
     if (!HOP.has(key.toLowerCase())) headers.set(key, value);
@@ -73,12 +81,19 @@ async function proxy(
   }
   // Zaman aşımı yoksa yavaş bir sorgu Next sürecinin soket havuzunu tüketir ve
   // panel bütün operatörler için yanıt vermez olur.
-  const upstream = await fetch(target, { ...init, signal: AbortSignal.timeout(20_000) });
-  const body = await upstream.arrayBuffer();
-  const responseHeaders = new Headers();
-  const contentType = upstream.headers.get('content-type');
-  if (contentType) responseHeaders.set('content-type', contentType);
-  return new NextResponse(body, { status: upstream.status, headers: responseHeaders });
+  try {
+    const upstream = await fetch(target, { ...init, signal: AbortSignal.timeout(20_000) });
+    const body = await upstream.arrayBuffer();
+    const responseHeaders = new Headers();
+    const contentType = upstream.headers.get('content-type');
+    if (contentType) responseHeaders.set('content-type', contentType);
+    return new NextResponse(body, { status: upstream.status, headers: responseHeaders });
+  } catch {
+    return NextResponse.json(
+      { error: 'api_unavailable', message: 'Sunucuya bağlanılamadı; tekrar deneyin' },
+      { status: 503 },
+    );
+  }
 }
 
 export function GET(request: Request, context: { params: Promise<{ path: string[] }> }) {

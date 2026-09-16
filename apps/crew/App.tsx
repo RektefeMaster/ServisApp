@@ -28,13 +28,19 @@ function AppContent() {
 
   useEffect(() => {
     void (async () => {
-      await openOutbox();
-      const restored = await restoreSupabaseSession();
-      if (restored) {
-        setSession(restored);
-        setRoute({ name: 'today' });
+      try {
+        await openOutbox();
+        const restored = await restoreSupabaseSession();
+        if (restored) {
+          setSession(restored);
+          setRoute({ name: 'today' });
+        }
+      } catch {
+        // Kuyruk/depolama okunamıyorsa giriş ekranı yine açılabilir.
+      } finally {
+        // Kuyruk/depolama arızası yüzünden sonsuz açılış göstergesi kalmasın.
+        setReady(true);
       }
-      setReady(true);
     })();
   }, []);
 

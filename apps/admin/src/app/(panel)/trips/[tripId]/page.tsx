@@ -154,7 +154,7 @@ function LiveSchematic({ trip, stale }: { trip: TripDetail; stale: boolean }) {
             ? trip.live.isStale
               ? 'Konum gecikti; eski nokta canlı gibi gösterilmez.'
               : `Canlı · ${new Date(trip.live.recordedAt).toLocaleTimeString('tr-TR')}`
-            : 'Araçtan konum yok. Yan menüde ayrı harita maddesi yoktur.'}
+            : 'Araçtan henüz konum alınmadı.'}
       </p>
     </div>
   );

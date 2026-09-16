@@ -107,7 +107,7 @@ export function Shell({ children }: { children: ReactNode }) {
   }
 
   const nav = (
-    <nav aria-label="Panel bölümleri" className="flex flex-col gap-0.5 p-2">
+    <nav aria-label="Panel bölümleri" className="flex flex-col gap-1 p-3">
       {NAV.map((item) => {
         const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
         return (
@@ -118,8 +118,8 @@ export function Shell({ children }: { children: ReactNode }) {
             // Dar ekranda seçimden sonra menü kapanır; açık kalırsa içeriği
             // kaplamaya devam ediyordu.
             onClick={() => setMenuOpen(false)}
-            className={`rounded-md px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink ${
-              active ? 'bg-ink text-paper' : 'text-ink hover:bg-rule/40'
+            className={`min-h-10 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink ${
+              active ? 'bg-ink font-medium text-paper shadow-sm' : 'text-ink hover:bg-[#e9efe9]'
             }`}
           >
             {item.label}
@@ -139,8 +139,10 @@ export function Shell({ children }: { children: ReactNode }) {
       </a>
 
       {/* Dar ekran: sabit yan sütun 224 puntoyu yiyor ve içeriğe yer kalmıyordu. */}
-      <header className="flex items-center justify-between border-b border-rule bg-white/70 px-4 py-3 lg:hidden">
-        <p className="font-serif text-lg tracking-tight">ServisApp</p>
+      <header className="flex items-center justify-between border-b border-rule bg-white/90 px-4 py-3 lg:hidden">
+        <p className="font-serif text-lg tracking-tight">
+          ServisApp <span className="font-sans text-xs font-medium text-muted">/ Yönetim</span>
+        </p>
         <button
           type="button"
           aria-expanded={menuOpen}
@@ -154,11 +156,14 @@ export function Shell({ children }: { children: ReactNode }) {
 
       <aside
         id="panel-menu"
-        className={`${menuOpen ? 'block' : 'hidden'} border-b border-rule bg-white/70 lg:block lg:w-56 lg:shrink-0 lg:border-b-0 lg:border-r`}
+        className={`${menuOpen ? 'block' : 'hidden'} border-b border-rule bg-white/90 lg:block lg:w-60 lg:shrink-0 lg:border-b-0 lg:border-r`}
       >
         <div className="hidden border-b border-rule px-4 py-5 lg:block">
-          <p className="font-serif text-lg tracking-tight">ServisApp</p>
-          <p className="mt-1 text-xs text-muted">{session.fullName}</p>
+          <p className="font-serif text-2xl tracking-tight">ServisApp</p>
+          <p className="mt-1 text-xs font-medium uppercase tracking-[0.18em] text-muted">
+            Operasyon merkezi
+          </p>
+          <p className="mt-5 border-l-2 border-stripe pl-3 text-sm text-ink">{session.fullName}</p>
         </div>
 
         {adminTenants.length > 1 ? (
@@ -197,7 +202,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </button>
       </aside>
 
-      <main id="panel-icerik" className="flex-1 p-4 lg:p-8">
+      <main id="panel-icerik" className="min-w-0 flex-1 p-4 sm:p-6 lg:p-9">
         {children}
       </main>
     </div>

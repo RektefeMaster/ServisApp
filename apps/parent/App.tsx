@@ -44,19 +44,24 @@ function AppContent() {
 
   useEffect(() => {
     void (async () => {
-      const restored = await restoreSession();
-      if (restored) {
-        setSession(restored);
-        setRoute({ name: 'home' });
-        void registerParentPush(restored);
-      } else {
-        // Veli SMS'teki daveti tıklayarak geldiyse jetonla doğrudan aktivasyona
-        // düşer; oturumu olan veliyi davet ekranı rahatsız etmez.
-        const initialUrl = await Linking.getInitialURL();
-        const token = initialUrl ? parseInviteToken(initialUrl) : null;
-        if (token) setRoute({ name: 'invite', token });
+      try {
+        const restored = await restoreSession();
+        if (restored) {
+          setSession(restored);
+          setRoute({ name: 'home' });
+          void registerParentPush(restored);
+        } else {
+          // SMS davetiyle açan veli doğrudan aktivasyona geçer.
+          const initialUrl = await Linking.getInitialURL();
+          const token = initialUrl ? parseInviteToken(initialUrl) : null;
+          if (token) setRoute({ name: 'invite', token });
+        }
+      } catch {
+        // Oturum okunamıyorsa giriş ekranı yine açılabilir.
+      } finally {
+        // Güvenli depolama veya bağlantı arızasında açılış ekranında kilitlenme.
+        setReady(true);
       }
-      setReady(true);
     })();
   }, []);
 

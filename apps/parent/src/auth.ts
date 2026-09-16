@@ -84,7 +84,7 @@ export async function persistSession(session: ParentSession): Promise<void> {
 export async function clearSession(): Promise<void> {
   await deleteSecret(SESSION_KEY);
   const client = createAuthClient();
-  if (client) await client.auth.signOut();
+  if (client) await client.auth.signOut({ scope: 'local' });
 }
 
 function pickGuardian(

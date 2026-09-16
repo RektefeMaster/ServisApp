@@ -136,7 +136,8 @@ async function request(
       headers: headers(session ? { ...session, token: token ?? session.token } : null),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  } catch {
+  } catch (caught) {
+    if (caught instanceof ApiError) throw caught;
     throw new ApiError(0, 'offline', 'Şu an internet yok');
   }
   const payload = await parseBody(response);

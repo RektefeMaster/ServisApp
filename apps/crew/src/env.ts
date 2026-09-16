@@ -1,12 +1,13 @@
-/**
- * Expo derleme zamanında `process.env.EXPO_PUBLIC_*` değerlerini gömer, ama
- * React Native'de `process.env` tipsizdir (`any`). Tipsiz okuma sessizce
- * `undefined.replace(...)` gibi çalışma zamanı çökmelerine yol açar; bu yüzden
- * ortam değişkeni tek kapıdan ve tip güvenli okunur.
- */
-export function envString(key: string): string | undefined {
-  const table = process.env as unknown as Record<string, string | undefined>;
-  const value = table[key];
+/** Expo yalnız nokta notasyonuyla yazılmış sabit anahtarları pakete gömer. */
+const publicEnv = {
+  EXPO_PUBLIC_API_URL: process.env.EXPO_PUBLIC_API_URL as unknown,
+  EXPO_PUBLIC_SUPABASE_URL: process.env.EXPO_PUBLIC_SUPABASE_URL as unknown,
+  EXPO_PUBLIC_SUPABASE_ANON_KEY: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY as unknown,
+  EXPO_PUBLIC_DEV_LOGIN: process.env.EXPO_PUBLIC_DEV_LOGIN as unknown,
+} as const;
+
+export function envString(key: keyof typeof publicEnv): string | undefined {
+  const value: unknown = publicEnv[key];
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;

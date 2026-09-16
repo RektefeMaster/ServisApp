@@ -1,9 +1,9 @@
 @import 'tailwindcss';
 
 @theme {
-  --color-paper: #eef1ec;
-  --color-ink: #1b2a4a;
-  --color-rule: #c9d0c6;
+  --color-paper: #f5f5f0;
+  --color-ink: #253a38;
+  --color-rule: #dbe1d9;
   /*
    * Form alanı kenarı. Alan dolgusu da kart zemini de beyaz; alanın nerede
    * başladığını yalnız kenarlık söylüyor. `rule` beyaz üstünde 1.58:1 ile
@@ -12,7 +12,7 @@
    */
   --color-field: #7c8878;
   --color-stripe: #d4a017;
-  --color-muted: #5c675e;
+  --color-muted: #52645c;
 }
 
 html,
@@ -21,9 +21,14 @@ body {
 }
 
 body {
-  background: var(--color-paper);
+  background: linear-gradient(145deg, #f0f3ef 0%, #f8f8f4 56%, #f3f0e9 100%);
   color: var(--color-ink);
   font-family: var(--font-sans), 'IBM Plex Sans', sans-serif;
+}
+
+::selection {
+  background: #dce9df;
+  color: var(--color-ink);
 }
 
 .font-serif {

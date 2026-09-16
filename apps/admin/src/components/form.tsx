@@ -12,9 +12,9 @@ import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 
 export function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="mt-6 border border-rule bg-white p-4">
-      <h2 className="text-sm font-medium">{title}</h2>
-      <div className="mt-3">{children}</div>
+    <section className="mt-6 rounded-2xl border border-rule bg-white p-5 shadow-sm sm:p-6">
+      <h2 className="font-serif text-lg tracking-tight">{title}</h2>
+      <div className="mt-4">{children}</div>
     </section>
   );
 }
@@ -45,7 +45,7 @@ export function Field({
  * hedefleri ıskalıyordu. Yükseklik ve görünür odak, bu ekranın işlevidir.
  */
 const inputClass =
-  'mt-1 w-full rounded border border-field bg-white px-3 py-2 text-sm ' +
+  'mt-1 w-full min-h-11 rounded-lg border border-field bg-white px-3 py-2 text-sm ' +
   'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink';
 
 export function TextField({
@@ -167,7 +167,7 @@ export function FormGrid({
           type="submit"
           disabled={busy}
           aria-busy={busy}
-          className="rounded bg-ink px-4 py-2 text-sm text-paper focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:opacity-50"
+          className="min-h-11 rounded-lg bg-ink px-5 py-2 text-sm font-medium text-paper shadow-sm transition-colors hover:bg-[#33524d] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:opacity-50"
         >
           {busy ? 'Kaydediliyor…' : submitLabel}
         </button>
