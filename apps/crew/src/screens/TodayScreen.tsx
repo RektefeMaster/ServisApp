@@ -46,15 +46,15 @@ function formatDayTitle(ymd: string): string {
   }).format(date);
 }
 
-let autoOpenedActiveTripId: string | null = null;
-
 export function TodayScreen({
   session,
+  autoOpenActiveTrip = true,
   onOpenTrip,
   onLogout,
   onSessionInvalid,
 }: {
   session: CrewSession;
+  autoOpenActiveTrip?: boolean;
   onOpenTrip: (tripId: string) => void;
   onLogout: () => void;
   onSessionInvalid: () => void;
@@ -114,11 +114,9 @@ export function TodayScreen({
   }, [reload]);
 
   useEffect(() => {
-    if (!resume || resume.reason !== 'ACTIVE') return;
-    if (autoOpenedActiveTripId === resume.id) return;
-    autoOpenedActiveTripId = resume.id;
+    if (!autoOpenActiveTrip || !resume || resume.reason !== 'ACTIVE') return;
     onOpenTrip(resume.id);
-  }, [resume, onOpenTrip]);
+  }, [autoOpenActiveTrip, resume, onOpenTrip]);
 
   const sorted = useMemo(
     () =>
@@ -186,6 +184,7 @@ export function TodayScreen({
       </View>
 
       <ScrollView
+        style={styles.flex}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.content}
         refreshControl={
@@ -281,13 +280,13 @@ export function TodayScreen({
             <AppText preset="meta" color={colors.railSoft}>
               {segmentLabel(resumeTrip.segment)} · {tripStateLabel(resumeTrip.state)}
             </AppText>
-            <JourneyArt compact />
             <View style={styles.featureBottom}>
               <AppText preset="strong" color={colors.rail}>
                 {resumeTrip.state === 'ACTIVE' ? 'Sefere devam et' : 'Seferi incele'}
               </AppText>
               <AppIcon name="arrow" color={colors.rail} />
             </View>
+            <JourneyArt compact />
           </Pressable>
         ) : null}
 
@@ -422,6 +421,7 @@ export function TodayScreen({
 }
 
 const styles = StyleSheet.create({
+  flex: { flex: 1 },
   updateStatus: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   updateDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.ok },
   stats: {

@@ -10,7 +10,10 @@ import { LoginScreen } from './src/screens/LoginScreen';
 import { TodayScreen } from './src/screens/TodayScreen';
 import { TripScreen } from './src/screens/TripScreen';
 
-type Route = { name: 'login' } | { name: 'today' } | { name: 'trip'; tripId: string };
+type Route =
+  | { name: 'login' }
+  | { name: 'today'; suppressResume?: boolean }
+  | { name: 'trip'; tripId: string };
 
 export default function App() {
   return (
@@ -73,7 +76,9 @@ function AppContent() {
         <TripScreen
           session={session}
           tripId={route.tripId}
-          onBack={() => setRoute({ name: 'today' })}
+          // Detaydan geri dönüşte aktif sefer kartı tekrar kendiliğinden
+          // açılmasın; kullanıcı ana ekranda kalıp başka sefer seçebilsin.
+          onBack={() => setRoute({ name: 'today', suppressResume: true })}
           onSessionInvalid={() => {
             void clearSession();
             setSession(null);
@@ -89,6 +94,7 @@ function AppContent() {
     <>
       <TodayScreen
         session={session}
+        autoOpenActiveTrip={!route.suppressResume}
         onOpenTrip={(tripId) => setRoute({ name: 'trip', tripId })}
         onLogout={() => {
           void clearSession();
